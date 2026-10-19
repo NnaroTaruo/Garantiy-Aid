@@ -2,19 +2,37 @@
 
 React Native + Expo beneficiary frontend built from Ronan's Figma mobile designs.
 
-## Run on your phone
+## Run in the browser
 
-From PowerShell:
+Start the [backend API](../backend/README.md) first. From the repository root, open another PowerShell terminal:
 
 ```powershell
-cd C:\Users\Ronan\Documents\Garantiy-Aid\mobile
+cd mobile
 npm install
-npm start
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Open Expo Go on Android and scan the terminal's QR code. Your computer and phone should be on the same Wi-Fi. If Expo Go asks for an SDK update, update it before opening this SDK 57 project. Use `npm run web` for a browser preview.
+Set `EXPO_PUBLIC_API_URL=http://127.0.0.1:3000` in `mobile/.env`, then run:
 
-Start the API in `../backend` before registering or logging in. Copy `.env.example` to `.env`; use `http://127.0.0.1:3000` for the browser, `http://10.0.2.2:3000` for the Android Studio emulator, or this computer's LAN address for Expo Go on a physical phone. The local backend displays each generated development OTP on the verification screen because SMS is not connected yet.
+```powershell
+npm run web -- --port 8765
+```
+
+Open `http://127.0.0.1:8765`. Port `8765` matches the backend's configured browser origins. Keep an existing environment file and restart Expo whenever its API URL changes. The development OTP appears on the verification screen and in the backend terminal because SMS delivery is not connected yet.
+
+## Run on your phone or emulator
+
+Set `EXPO_PUBLIC_API_URL` in `mobile/.env` for the target device:
+
+| Target | API URL |
+| --- | --- |
+| Browser on this computer | `http://127.0.0.1:3000` |
+| Android Studio emulator | `http://10.0.2.2:3000` |
+| Expo Go on a physical phone | `http://<computer-LAN-IP>:3000` |
+
+For Expo Go, use the computer's actual LAN address, keep the phone and computer on the same Wi-Fi, and run `npm start` from `mobile/`. Open Expo Go on Android and scan the terminal's QR code. Use an Expo Go version compatible with this SDK 57 project.
+
+The API must remain running on the computer. The phone must be able to reach its LAN address on port `3000`. The private `.env` file is ignored by Git.
 
 Skip optional face enrollment or choose demo capture. Camera access is requested only after the consent screen and the Enable camera button. Photos are not uploaded, and demo capture does not perform face matching or liveness checks.
 

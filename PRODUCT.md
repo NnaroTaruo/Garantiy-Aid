@@ -8,7 +8,7 @@ android
 
 ## Stack
 
-React Native with Expo, as specified by the capstone manuscript. The mobile app uses TypeScript and Expo Router. Backend integration remains an open team task.
+React Native with Expo, as specified by the capstone manuscript. The mobile app uses TypeScript and Expo Router. Its supporting local REST API uses Node.js, Express, Prisma, and PostgreSQL. Registration, phone OTP access, profiles, enrollments, schedules, QR issuance, and read-only claim and wallet records are connected. Integration with the team's staff web workflow remains open.
 
 ## Users
 
@@ -20,11 +20,15 @@ Help beneficiaries register, view an assigned distribution schedule and queue nu
 
 ## Operating Context
 
-The manuscript proposes one REST backend shared by the mobile and web apps. The supplied ERD defines beneficiaries, schedules, QR tokens, claims, notifications, enrollment, documents, consent, wallet accounts, and transactions. Real authentication, scheduling, token issuance, and claim validation belong to the backend.
+The manuscript proposes one REST backend shared by the mobile and web apps. The supplied ERD defines beneficiaries, schedules, QR tokens, claims, notifications, enrollment, documents, consent, wallet accounts, and transactions. The local API now provides the beneficiary-facing account and record endpoints. Authorized staff scheduling actions, QR scanning, identity verification, and atomic claim completion still need to be integrated through the shared backend and staff web application.
 
 ## Capabilities and Constraints
 
-The initial mobile deliverable is an interactive frontend with synthetic data. Account creation collects personal identity, birth date, sex, home address, barangay, city, and mobile number in memory before OTP verification. OTP, account recovery, address or identity record checking, facial matching/liveness, claim approval, support escalation, and notifications are not connected to services. Face capture is optional and requires opt-in; captures are not uploaded. The wallet is a simulation only. No real funds, government database connection, or live payment integration is in scope.
+As of October 19, 2026, account creation collects personal identity, birth date, sex, home address, barangay/service area, city, and mobile number. Registration submits the beneficiary details to PostgreSQL before OTP verification. Generated phone OTP codes support registration and sign-in in development; SMS delivery is not connected. Session restoration, protected tabs, logout, and stored profile details use the backend. Session guards discard obsolete responses after logout or account switching.
+
+Program enrollment, assigned schedules, server-issued expiring QR passes, claim status, wallet history, and transaction receipts use saved account records. The beneficiary app displays staff-assigned records and cannot approve its own claims. The wallet is an assistance ledger; it does not hold or transfer funds. The seed provides fictional local test records with fixed dates rather than a live government distribution feed.
+
+Notifications, required-document uploads, profile changes, password/account recovery, live staff escalation, and real biometric matching/liveness remain unconnected. Face consent and camera capture are optional previews; captures are not uploaded. Help uses saved schedules and claim status, while other answers remain fixed preview responses. No government database connection or live payment integration is in scope. Web and Android exports pass, but a complete visual review of the latest fixes and physical Android validation remain pending.
 
 ## Brand Commitments
 
