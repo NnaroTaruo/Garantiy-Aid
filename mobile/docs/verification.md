@@ -1,5 +1,13 @@
 # Frontend verification
 
+Profile editing milestone checked on October 20, 2026:
+
+- All 22 mobile regression tests, five backend tests, and both real-database integration checks pass. New checks cover editable-field validation, active service areas, protected fields, isolation between accounts, persistence across sessions, and delayed responses after logout/account switching.
+- The form check covers retained invalid drafts, duplicate-save prevention, server field errors, allowed payload fields, normalized success values, and disabling inputs while saving. It uses controlled React hooks rather than a live browser.
+- Both TypeScript checks and web/Android exports pass. This feature uses existing beneficiary fields and adds no database migration or dependencies.
+- The local API was restarted with the updated routes. Browser automation reports no connected browser; a manual Profile > Edit profile > Save > logout/login walkthrough and physical Android checks remain pending.
+- The user reports that the preceding notification feature works.
+
 Notification milestone checked on October 20, 2026:
 
 - Applied `20261019010000_add_notifications`; Prisma's database/schema comparison reports no difference.

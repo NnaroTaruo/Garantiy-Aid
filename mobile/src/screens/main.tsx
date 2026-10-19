@@ -478,7 +478,7 @@ export function ProfileScreen() {
       </Card>
       <Card style={{ gap: 0, paddingVertical: 4 }}>
         <MenuRow
-          title={t('My saved details', 'Akong natipig nga detalye')}
+          title={t('Edit profile', 'Usba ang profile')}
           icon={UserRound}
           onPress={() => go('edit-profile')}
         />

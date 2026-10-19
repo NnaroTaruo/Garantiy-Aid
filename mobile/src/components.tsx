@@ -275,6 +275,7 @@ export function Field({
   autoComplete,
   textContentType,
   maxLength,
+  editable = true,
 }: {
   label: string;
   value: string;
@@ -287,6 +288,7 @@ export function Field({
   autoComplete?: TextInputProps['autoComplete'];
   textContentType?: TextInputProps['textContentType'];
   maxLength?: number;
+  editable?: boolean;
 }) {
   const { t } = useDemo();
   return (
@@ -312,7 +314,8 @@ export function Field({
         autoComplete={autoComplete}
         textContentType={textContentType}
         maxLength={maxLength}
-        style={[styles.input, error && { borderColor: c.error }]}
+        editable={editable}
+        style={[styles.input, error && { borderColor: c.error }, !editable && { opacity: 0.6 }]}
       />
       {error ? (
         <Txt

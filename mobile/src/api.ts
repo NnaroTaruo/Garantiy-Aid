@@ -9,6 +9,7 @@ export class ApiRequestError extends Error {
     public readonly code: string,
     message: string,
     public readonly status?: number,
+    public readonly fields?: Record<string, string>,
   ) {
     super(message);
   }
@@ -29,6 +30,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         body?.error?.code ?? 'REQUEST_FAILED',
         body?.error?.message ?? 'The request could not be completed.',
         response.status,
+        body?.error?.fields,
       );
     }
     return body as T;
@@ -64,6 +66,8 @@ export type Beneficiary = {
   isVerified: boolean;
   status: string;
 };
+
+export type ProfileUpdate = Pick<Beneficiary, 'firstName' | 'middleName' | 'lastName' | 'address' | 'barangayId'>;
 
 export type ProgramEnrollment = {
   id: string;
@@ -253,6 +257,16 @@ export async function getCurrentBeneficiary(accessToken: string) {
   return (
     await request<{ data: Beneficiary }>('/beneficiaries/me', {
       headers: { Authorization: `Bearer ${accessToken}` },
+    })
+  ).data;
+}
+
+export async function updateProfile(accessToken: string, input: ProfileUpdate) {
+  return (
+    await request<{ data: Beneficiary }>('/beneficiaries/me', {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify(input),
     })
   ).data;
 }

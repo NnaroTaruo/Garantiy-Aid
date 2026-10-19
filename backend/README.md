@@ -44,6 +44,7 @@ During development, OTP codes are printed in the backend terminal and returned a
 - `POST /auth/otp/verify`
 - `POST /auth/logout`
 - `GET /beneficiaries/me`
+- `PATCH /beneficiaries/me`
 - `GET /beneficiaries/me/overview`
 - `GET /beneficiaries/me/wallet`
 - `GET /beneficiaries/me/notifications`
@@ -51,6 +52,8 @@ During development, OTP codes are printed in the backend terminal and returned a
 - `POST /beneficiaries/me/claim-pass`
 
 Protected endpoints use `Authorization: Bearer <accessToken>`. Access tokens are random, stored only as hashes, expire after seven days, and are revoked by logout.
+
+`PATCH /beneficiaries/me` accepts partial updates containing only `firstName`, `middleName`, `lastName`, `address`, and `barangayId`; it returns the updated public profile. Names are trimmed, support Unicode letters and common punctuation, and have a 100-character limit. A blank/null middle name clears it. Addresses must have 5–500 trimmed characters. A different barangay must be active; an existing inactive barangay may be retained while correcting other details. Empty payloads, unsupported/protected fields, and invalid values return 422. Mobile number, birth date, sex, verification, and account status cannot be changed here. These edits do not reassign programs or schedules.
 
 Claim passes are opaque, distribution-scoped values returned only when issued. PostgreSQL stores a keyed hash rather than the raw QR value. Issuing a replacement revokes the previous active pass, and each pass expires at the end of its assigned schedule. Staff-side scanning and claim approval remain separate work.
 
@@ -60,4 +63,4 @@ The notification inbox returns only the signed-in beneficiary's `in_app` records
 
 The seed adds a historical schedule message and a claim message labeled **Demo**, linked to its existing schedules. Re-running the seed preserves their read timestamps. Real schedule/claim messages must be created by the team's authorized staff backend, in the same transaction as the event they describe; it must check that the linked schedule belongs to the recipient. Automatic event generation, SMS, and OS push delivery are not implemented.
 
-Run `npm test` and `npm run typecheck` for the regular checks. With local PostgreSQL running and migrations applied, run `npm run test:integration` to verify notification ownership, hidden delivery states, idempotent reads, and logout/login persistence against the real database. It creates isolated test records and removes them afterward.
+Run `npm test` and `npm run typecheck` for the regular checks. With local PostgreSQL running and migrations applied, run `npm run test:integration` to verify notification ownership and read persistence, plus profile update validation, ownership, protected fields, service-area rules, and persistence across sessions. The checks create isolated test records and remove them afterward.

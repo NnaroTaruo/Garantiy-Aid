@@ -7,9 +7,9 @@ GarantiyAid is a capstone prototype for beneficiary registration, phone OTP auth
 - [`mobile/`](mobile/README.md) — React Native and Expo beneficiary app based on the supplied Figma design.
 - [`backend/`](backend/README.md) — Express, Prisma, and PostgreSQL REST API.
 
-Registration, generated OTP verification, persistent sessions, profile loading, program enrollments, assigned schedules, QR pass issuance, read-only claim and wallet history, and in-app notifications use the backend database. Biometrics and SMS/push delivery remain previews. Staff scanning, claim approval, and notification creation still need integration with the team's web workflow. The wallet records assistance; it does not hold or transfer funds.
+Registration, generated OTP verification, persistent sessions, profile loading and editing, program enrollments, assigned schedules, QR pass issuance, read-only claim and wallet history, and in-app notifications use the backend database. Biometrics and SMS/push delivery remain previews. Staff scanning, claim approval, and notification creation still need integration with the team's web workflow. The wallet records assistance; it does not hold or transfer funds.
 
-The latest update connects the notification inbox, details, and Home unread badge to each beneficiary's saved messages. Opening a message saves its first read timestamp, which persists across logout/login. The seed adds two clearly labeled historical demo messages; new accounts start with an empty inbox.
+The latest update lets beneficiaries save name, address, and barangay changes from **Profile > Edit profile**. Updates are validated, scoped to the signed-in account, and retained across logout/login. The saved notification inbox, details, and Home unread badge remain connected; the seed provides two labeled historical demo messages.
 
 Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. The READMEs include the newer notification milestone.
 

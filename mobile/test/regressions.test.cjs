@@ -30,7 +30,7 @@ function deferred() {
 }
 
 class ApiRequestError extends Error {
-  constructor(status) { super('Request failed'); this.status = status; }
+  constructor(status, fields) { super('Request failed'); this.status = status; this.fields = fields; }
 }
 const beneficiary = (id) => ({ id, firstName: id, middleName: null, lastName: 'Test', contactNumber: '+639000000000' });
 const overview = (id) => ({ enrollments: [{ id }], nextSchedule: null });
@@ -65,6 +65,7 @@ function provider(api = {}, storage = {}) {
       getWalletOverview: async (token) => wallet(token),
       getNotifications: async () => [],
       markNotificationRead: async (_token, id) => ({ id, readAt: '2026-10-20T01:00:00Z' }),
+      updateProfile: async (token, input) => ({ ...beneficiary(token), ...input }),
       ...api,
     },
     './session-storage': {
@@ -233,6 +234,60 @@ test('notification load errors can be retried; a current 401 clears account data
   assert.equal(render().notifications.length, 0);
 });
 
+test('profile saves update the shared identity only after success and preserve it on failure', async () => {
+  const render = provider();
+  await render().startSession('owner', beneficiary('owner'));
+  const updated = await render().saveProfile({ firstName: 'María', middleName: null, lastName: 'Dela Cruz', address: '24 New Street' });
+  assert.equal(updated.address, '24 New Street');
+  assert.equal(render().beneficiary.address, '24 New Street');
+  assert.equal(render().name, 'María Dela Cruz');
+  let failure = new Error('Offline');
+  const failing = provider({ updateProfile: async () => { throw failure; } });
+  await failing().startSession('owner', beneficiary('owner'));
+  await assert.rejects(failing().saveProfile({ firstName: 'Never applied' }));
+  assert.equal(failing().beneficiary.firstName, 'owner');
+  failure = new ApiRequestError(401);
+  assert.equal(await failing().saveProfile({ firstName: 'Never applied' }), null);
+  assert.equal(failing().accessToken, '');
+  assert.equal(failing().beneficiary, null);
+});
+
+for (const outcome of ['logout', 'success', 'unauthorized']) {
+  test(`pending profile saves cannot alter an account after ${outcome}`, async () => {
+    const waiting = deferred();
+    let writes = 0;
+    const render = provider({ updateProfile: () => { writes++; return waiting.promise; } });
+    await render().startSession('old', beneficiary('old'));
+    const staleSave = render().saveProfile;
+    const saving = staleSave({ firstName: 'Old changed name' });
+    if (outcome === 'logout') await render().reset();
+    else await render().startSession('new', beneficiary('new'));
+    assert.equal(await staleSave({ firstName: 'No request' }), null);
+    assert.equal(writes, 1);
+    if (outcome === 'unauthorized') waiting.reject(new ApiRequestError(401));
+    else waiting.resolve({ ...beneficiary('old'), firstName: 'Old changed name' });
+    assert.equal(await saving, null);
+    assert.equal(render().accessToken, outcome === 'logout' ? '' : 'new');
+    assert.equal(render().beneficiary?.id ?? null, outcome === 'logout' ? null : 'new');
+    assert.ok(!render().name.includes('Old changed name'));
+  });
+}
+
+test('the profile API keeps server field errors for the form', async () => {
+  const source = loadSource('api.ts', { 'react-native': { Platform: { OS: 'web' } } }, {
+    process: { env: {} }, AbortController, setTimeout, clearTimeout,
+    fetch: async (_url, init) => {
+      assert.equal(init.method, 'PATCH');
+      assert.equal(init.headers.Authorization, 'Bearer owner');
+      return { status: 422, ok: false, json: async () => ({ error: {
+        code: 'VALIDATION_ERROR', message: 'Check the name', fields: { firstName: 'Use letters' },
+      } }) };
+    },
+  });
+  await assert.rejects(source.updateProfile('owner', { firstName: '123' }),
+    (error) => error.status === 422 && error.fields.firstName === 'Use letters');
+});
+
 for (const newerToken of [null, 'new']) {
   test(`native storage keeps logout/login order with final token ${newerToken}`, async () => {
     const waitingWrite = deferred(), started = deferred();
@@ -373,4 +428,76 @@ test('notification screens render saved records, translations, and honest loadin
   assert.ok(JSON.stringify(main.HomeScreen()).includes('Open notifications, unread messages'));
   state.notifications[0].readAt = 'saved';
   assert.ok(!JSON.stringify(main.HomeScreen()).includes('Open notifications, unread messages'));
+});
+
+test('the profile form retains failed edits, prevents double saves, and sends only editable fields', async () => {
+  let response = deferred(), writes = 0, sent, cursor = 0, loadAreas;
+  const slots = [];
+  const state = {
+    beneficiary: { ...beneficiary('owner'), middleName: 'Test', birthDate: '1990-01-01', sex: 'female',
+      address: '12 Old Street', barangayId: 'old', isVerified: true, status: 'active' },
+    t: (en) => en,
+    saveProfile: async (input) => {
+      writes++;
+      sent = input;
+      const updated = await response.promise;
+      state.beneficiary = updated;
+      return updated;
+    },
+  };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const useState = (initial) => {
+    const index = cursor++;
+    if (!(index in slots)) slots[index] = initial;
+    return [slots[index], (value) => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }];
+  };
+  const source = loadSource('screens/details.tsx', {
+    react: {
+      createElement: (type, props, ...children) => ({ type, props, children }), useState,
+      useRef: (initial) => useState({ current: initial })[0], useEffect: (effect) => { loadAreas = effect; },
+    },
+    'react-native': {}, 'expo-router': { useLocalSearchParams: () => ({ page: 'edit-profile' }) },
+    'expo-document-picker': {}, 'react-native-qrcode-svg': 'QRCode', 'lucide-react-native': components,
+    '../components': components, '../state': { useDemo: () => state },
+    '../theme': { colors: {}, fonts: {} }, '../format': {}, './main': { s: {} },
+    '../api': { ApiRequestError, getBarangays: async () => [
+      { id: 'old', barangayName: 'Old Area', city: 'Cebu', province: 'Cebu' },
+      { id: 'new', barangayName: 'New Area', city: 'Cebu', province: 'Cebu' },
+    ] },
+  });
+  const form = source.DetailScreen().children[0].children[0].type();
+  const render = () => { cursor = 0; return form.type({ beneficiary: state.beneficiary }); };
+  const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes)
+    : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  const field = (tree, label) => nodes(tree).find((node) => node.type === 'Field' && node.props.label === label);
+  const saveButton = (tree) => nodes(tree).find((node) => node.type === 'Button' && node.children[0] === 'Save changes');
+  render();
+  const cleanup = loadAreas();
+  await new Promise(setImmediate);
+  assert.equal(saveButton(render()).props.disabled, true);
+  field(render(), 'First name').props.onChangeText('123');
+  const button = saveButton(render());
+  button.props.onPress();
+  button.props.onPress();
+  assert.equal(writes, 1);
+  assert.equal(field(render(), 'First name').props.editable, false);
+  response.reject(new ApiRequestError(422, { firstName: 'Use letters' }));
+  await new Promise(setImmediate);
+  assert.equal(field(render(), 'First name').props.value, '123');
+  assert.ok(field(render(), 'First name').props.error);
+  assert.ok(!JSON.stringify(render()).includes('Your profile was saved.'));
+  field(render(), 'First name').props.onChangeText('  María  ');
+  nodes(render()).find((node) => node.props?.accessibilityRole === 'radio' && node.props.key === 'new').props.onPress();
+  response = deferred();
+  saveButton(render()).props.onPress();
+  assert.equal(writes, 2);
+  assert.equal(sent.barangayId, 'new');
+  assert.deepEqual(Object.keys(sent).sort(), ['address', 'barangayId', 'firstName', 'lastName', 'middleName']);
+  response.resolve({ ...state.beneficiary, ...sent, firstName: 'María' });
+  await new Promise(setImmediate);
+  assert.equal(field(render(), 'First name').props.value, 'María');
+  assert.equal(saveButton(render()).props.disabled, true);
+  assert.ok(JSON.stringify(render()).includes('Your profile was saved.'));
+  assert.equal(field(render(), 'Mobile number'), undefined);
+  cleanup();
 });

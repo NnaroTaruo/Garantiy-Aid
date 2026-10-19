@@ -3,7 +3,7 @@ import { config } from "./config.ts";
 import { prisma } from "./db.ts";
 import { ApiError } from "./errors.ts";
 import { createOtp, createQrToken, createSessionToken, hashSecret, secretMatches } from "./security.ts";
-import { parseOtpRequest, parseOtpVerification, parseRegistration, uuid } from "./validation.ts";
+import { parseOtpRequest, parseOtpVerification, parseProfileUpdate, parseRegistration, uuid } from "./validation.ts";
 
 const OTP_LIFETIME_MS = 5 * 60 * 1000;
 const OTP_RESEND_WAIT_MS = 60 * 1000;
@@ -225,6 +225,20 @@ app.post("/auth/logout", async (req, res) => {
 app.get("/beneficiaries/me", async (req, res) => {
   const { beneficiary } = await requireBeneficiary(req);
   res.json({ data: publicBeneficiary(beneficiary) });
+});
+
+app.patch("/beneficiaries/me", async (req, res) => {
+  const { beneficiary } = await requireBeneficiary(req);
+  const data = parseProfileUpdate(req.body);
+  if (data.barangayId && data.barangayId !== beneficiary.barangayId) {
+    const barangay = await prisma.barangay.findFirst({ where: { barangayId: data.barangayId, isActive: true } });
+    if (!barangay) throw new ApiError(422, "INVALID_BARANGAY", "Select an active barangay.", { barangayId: "Select an active barangay." });
+  }
+  const updated = await prisma.beneficiary.update({
+    where: { beneficiaryId: beneficiary.beneficiaryId },
+    data,
+  });
+  res.json({ data: publicBeneficiary(updated) });
 });
 
 app.get("/beneficiaries/me/overview", async (req, res) => {

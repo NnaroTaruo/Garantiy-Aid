@@ -37,7 +37,7 @@ import {
 } from '../components';
 import { appointment as a, peso, useDemo } from '../state';
 import { colors as c, fonts } from '../theme';
-import { ApiRequestError, getBarangays, issueClaimPass, type ClaimPass as ClaimPassData } from '../api';
+import { ApiRequestError, getBarangays, issueClaimPass, type Barangay, type Beneficiary, type ProfileUpdate, type ClaimPass as ClaimPassData } from '../api';
 import {
   formatDate,
   formatDateTime,
@@ -82,7 +82,7 @@ export function DetailScreen() {
       active: 'profile',
     },
     'edit-profile': {
-      title: t('My saved details', 'Akong natipig nga detalye'),
+      title: t('Edit profile', 'Usba ang profile'),
       content: <EditProfile />,
       active: 'profile',
     },
@@ -691,42 +691,74 @@ function Recovery() {
 }
 function EditProfile() {
   const { beneficiary, t } = useDemo();
-  const [serviceArea, setServiceArea] = useState<string | null>(null);
-  useEffect(() => {
-    if (!beneficiary) return;
-    let active = true;
-    setServiceArea(null);
-    getBarangays()
-      .then((barangays) => {
-        const barangay = barangays.find((item) => item.id === beneficiary.barangayId);
-        if (active) {
-          setServiceArea(
-            barangay
-              ? `${barangay.barangayName}, ${barangay.city}, ${barangay.province}`
-              : '',
-          );
-        }
-      })
-      .catch(() => {
-        if (active) setServiceArea('');
-      });
-    return () => {
-      active = false;
-    };
-  }, [beneficiary]);
   if (!beneficiary) {
     return (
-      <Notice tone="error">
-        {t(
-          'Your saved profile could not be loaded. Return to Profile and try again.',
-          'Wala ma-load ang imong profile. Balik sa Profile ug sulayi pag-usab.',
-        )}
-      </Notice>
+      <>
+        <Notice>{t('Sign in to edit your profile.', 'Pag-sign in para mausab ang imong profile.')}</Notice>
+        <Button onPress={() => router.replace('/')}>{t('Go to sign in', 'Adto sa sign in')}</Button>
+      </>
     );
   }
-  const fullName = [beneficiary.firstName, beneficiary.middleName, beneficiary.lastName]
-    .filter(Boolean)
-    .join(' ');
+  return <ProfileForm key={beneficiary.id} beneficiary={beneficiary} />;
+}
+
+function profileFields(beneficiary: Beneficiary): ProfileUpdate {
+  const { firstName, middleName, lastName, address, barangayId } = beneficiary;
+  return { firstName, middleName, lastName, address, barangayId };
+}
+
+function ProfileForm({ beneficiary }: { beneficiary: Beneficiary }) {
+  const { saveProfile, t } = useDemo();
+  const [draft, setDraft] = useState(profileFields(beneficiary));
+  const [barangays, setBarangays] = useState<Barangay[]>([]);
+  const [areaLoading, setAreaLoading] = useState(true);
+  const [areaError, setAreaError] = useState(false);
+  const [areaAttempt, setAreaAttempt] = useState(0);
+  const [errors, setErrors] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const savingRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    setAreaLoading(true);
+    setAreaError(false);
+    getBarangays().then((items) => { if (active) setBarangays(items); })
+      .catch(() => { if (active) setAreaError(true); })
+      .finally(() => { if (active) setAreaLoading(false); });
+    return () => { active = false; };
+  }, [areaAttempt]);
+  const change = (field: keyof ProfileUpdate, value: string) => {
+    setDraft((previous) => ({ ...previous, [field]: value }));
+    setErrors((previous) => ({ ...previous, [field]: false }));
+    setSaved(false);
+    setSaveError(false);
+  };
+  const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    setSaved(false);
+    setSaveError(false);
+    setErrors({});
+    try {
+      const updated = await saveProfile(draft);
+      if (updated) {
+        setDraft(profileFields(updated));
+        setSaved(true);
+      }
+    } catch (error) {
+      setSaveError(true);
+      if (error instanceof ApiRequestError && error.fields) {
+        setErrors(Object.fromEntries(Object.keys(error.fields).map((field) => [field, true])));
+      }
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+  const changed = (Object.keys(draft) as (keyof ProfileUpdate)[])
+    .some((field) => (draft[field] ?? '') !== (beneficiary[field] ?? ''));
   const birthDate = new Intl.DateTimeFormat('en-PH', {
     dateStyle: 'long',
     timeZone: 'UTC',
@@ -744,19 +776,60 @@ function EditProfile() {
           : t('Verification pending', 'Naghulat sa verification')}
       </Badge>
       <Card>
-        <DetailRow label={t('Full name', 'Kompletong ngalan')} value={fullName} />
+        {([
+          { field: 'firstName', label: t('First name', 'Ngalan') },
+          { field: 'middleName', label: t('Middle name (optional)', 'Tungang ngalan (opsyonal)') },
+          { field: 'lastName', label: t('Last name', 'Apelyido') },
+        ] as const).map(({ field, label }) => (
+          <Field key={field} label={label} value={draft[field] ?? ''}
+            onChangeText={(value) => change(field, value)} editable={!saving}
+            autoCapitalize="words" maxLength={100}
+            error={errors[field] ? t('Use letters and normal name punctuation, up to 100 characters.', 'Gamita ang mga letra ug hustong punctuation, hangtod 100 ka karakter.') : undefined}
+          />
+        ))}
+        <Field label={t('House no. and street', 'Numero sa balay ug dalan')}
+          value={draft.address} onChangeText={(value) => change('address', value)}
+          editable={!saving} autoCapitalize="words" autoComplete="street-address" maxLength={500}
+          error={errors.address ? t('Enter a complete address, 5–500 characters.', 'Isulod ang kompleto nga adres, 5–500 ka karakter.') : undefined}
+        />
+        <Txt variant="label">{t('Barangay and city', 'Barangay ug siyudad')}</Txt>
+        {areaLoading ? <Txt variant="small">{t('Loading service areas…', 'Nag-load sa mga service area…')}</Txt> : areaError ? (
+          <>
+            <Notice tone="error">{t('Service areas could not be loaded. Your saved barangay will be kept.', 'Wala ma-load ang mga service area. Magpabilin ang imong natipig nga barangay.')}</Notice>
+            <Button variant="outline" disabled={saving} onPress={() => setAreaAttempt((value) => value + 1)}>{t('Retry service areas', 'Sulayi pag-usab ang mga service area')}</Button>
+          </>
+        ) : (
+          <View accessibilityRole="radiogroup" accessibilityLabel={t('Barangay and city', 'Barangay ug siyudad')} style={{ gap: 8 }}>
+            {barangays.map((barangay) => {
+              const selected = draft.barangayId === barangay.id;
+              return (
+                <Pressable key={barangay.id} accessibilityRole="radio" disabled={saving}
+                  accessibilityState={{ checked: selected, disabled: saving }}
+                  onPress={() => change('barangayId', barangay.id)}
+                  style={[styles.input, styles.row, { gap: 8 }, selected && { borderColor: c.primary, backgroundColor: c.primarySoft }]}
+                >
+                  {selected && <Check size={18} color={c.primary} />}
+                  <Txt style={{ flex: 1 }}>{`${barangay.barangayName}, ${barangay.city}, ${barangay.province}`}</Txt>
+                </Pressable>
+              );
+            })}
+            {!barangays.some((item) => item.id === draft.barangayId) && (
+              <Notice>{t('Your saved barangay is not currently listed. It will be kept unless you choose another service area.', 'Wala sa listahan karon ang imong natipig nga barangay. Magpabilin kini gawas kon mopili ka og laing service area.')}</Notice>
+            )}
+          </View>
+        )}
+        {errors.barangayId && <Txt variant="small" accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: c.error }}>{t('Choose an active service area.', 'Pagpili og aktibong service area.')}</Txt>}
+      </Card>
+      {saveError && <Notice tone="error">{Object.values(errors).some(Boolean)
+        ? t('Check the highlighted fields and try saving again.', 'Susihon ang mga field ug sulayi pagtipig pag-usab.')
+        : t('We could not confirm your changes. Check your connection and try again.', 'Wala namo makumpirma ang imong mga kausaban. Susihon ang koneksyon ug sulayi pag-usab.')}</Notice>}
+      {saved && <Notice tone="success">{t('Your profile was saved.', 'Natipig na ang imong profile.')}</Notice>}
+      <Button loading={saving} disabled={!changed} onPress={() => void save()}>{t('Save changes', 'Tipigi ang mga kausaban')}</Button>
+      <Button variant="outline" disabled={saving} onPress={() => router.replace('/(tabs)/profile')}>{t('Back to Profile', 'Balik sa Profile')}</Button>
+      <Card>
         <DetailRow label={t('Birth date', 'Petsa sa pagkatawo')} value={birthDate} />
         <DetailRow label={t('Sex', 'Sekso')} value={sex} />
         <DetailRow label={t('Mobile number', 'Numero sa cellphone')} value={beneficiary.contactNumber} />
-        <DetailRow label={t('House no. and street', 'Numero sa balay ug dalan')} value={beneficiary.address} />
-        <DetailRow
-          label={t('Barangay and city', 'Barangay ug siyudad')}
-          value={
-            serviceArea === null
-              ? t('Loading service area…', 'Nag-load sa service area…')
-              : serviceArea || t('Unavailable', 'Dili magamit')
-          }
-        />
         <DetailRow
           label={t('Account status', 'Kahimtang sa account')}
           value={beneficiary.status.charAt(0).toUpperCase() + beneficiary.status.slice(1)}
@@ -764,13 +837,10 @@ function EditProfile() {
       </Card>
       <Notice>
         {t(
-          'These details come from your saved beneficiary record. Contact your facilitator to request an official correction.',
-          'Kini nga mga detalye gikan sa natipig nga beneficiary record. Kontaka ang facilitator aron mangayo og opisyal nga koreksyon.',
+          'Mobile-number changes need separate verification. For birth date or sex corrections, contact your facilitator.',
+          'Ang pag-usab sa numero kinahanglan og laing verification. Para sa koreksyon sa petsa sa pagkatawo o sekso, kontaka ang facilitator.',
         )}
       </Notice>
-      <Button onPress={() => go('support')}>
-        {t('Request a correction', 'Mangayo og koreksyon')}
-      </Button>
     </>
   );
 }

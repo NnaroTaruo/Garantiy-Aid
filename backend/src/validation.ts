@@ -102,6 +102,40 @@ export function parseRegistration(value: unknown): RegistrationInput {
   };
 }
 
+function personName(value: string, field: string): string {
+  if (!/\p{L}/u.test(value) || !/^[\p{L}\p{M} .'’-]+$/u.test(value)) {
+    throw new ApiError(422, "VALIDATION_ERROR", "Please correct the highlighted fields.", {
+      [field]: "Use letters and normal name punctuation only.",
+    });
+  }
+  return value;
+}
+
+type ProfileUpdateInput = Partial<Pick<RegistrationInput,
+  "firstName" | "middleName" | "lastName" | "address" | "barangayId"
+>>;
+
+export function parseProfileUpdate(value: unknown): ProfileUpdateInput {
+  const body = bodyRecord(value);
+  const allowed = ["firstName", "middleName", "lastName", "address", "barangayId"];
+  if (!Object.keys(body).length || Object.keys(body).some((key) => !allowed.includes(key))) {
+    throw new ApiError(422, "INVALID_PROFILE_UPDATE", "Supply only name, address, or barangay changes.");
+  }
+  const data: ProfileUpdateInput = {};
+  if ("firstName" in body) data.firstName = personName(text(body, "firstName", 100), "firstName");
+  if ("lastName" in body) data.lastName = personName(text(body, "lastName", 100), "lastName");
+  if ("middleName" in body) {
+    const middle = optionalText(body, "middleName", 100);
+    data.middleName = middle ? personName(middle, "middleName") : null;
+  }
+  if ("address" in body) {
+    data.address = text(body, "address", 500);
+    if (data.address.length < 5) throw new ApiError(422, "VALIDATION_ERROR", "Enter a complete address.", { address: "Use at least 5 characters." });
+  }
+  if ("barangayId" in body) data.barangayId = uuid(body.barangayId, "barangayId");
+  return data;
+}
+
 export function parseOtpRequest(value: unknown): { contactNumber: string; purpose: "register" | "login" } {
   const body = bodyRecord(value);
   const contactNumber = normalizePhilippinePhone(String(body.contactNumber ?? ""));

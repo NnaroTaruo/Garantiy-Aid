@@ -6,10 +6,12 @@ import {
   getWalletOverview,
   getNotifications,
   markNotificationRead,
+  updateProfile,
   type Beneficiary,
   type BeneficiaryOverview,
   type WalletOverview,
   type BeneficiaryNotification,
+  type ProfileUpdate,
 } from './api';
 import { clearStoredToken, getStoredToken, storeToken } from './session-storage';
 
@@ -43,6 +45,7 @@ type DemoState = {
   setPhone: (value: string) => void;
   accessToken: string;
   beneficiary: Beneficiary | null;
+  saveProfile: (input: ProfileUpdate) => Promise<Beneficiary | null>;
   overview: BeneficiaryOverview | null;
   overviewLoading: boolean;
   overviewError: boolean;
@@ -127,6 +130,23 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     );
   };
   // Ignore responses from sessions that were logged out or replaced.
+  const saveProfile = async (input: ProfileUpdate) => {
+    const version = renderedSessionVersion;
+    if (!accessToken || version !== sessionVersion.current) return null;
+    try {
+      const updated = await updateProfile(accessToken, input);
+      if (version !== sessionVersion.current) return null;
+      applyBeneficiary(updated);
+      return updated;
+    } catch (error) {
+      if (version !== sessionVersion.current) return null;
+      if (error instanceof ApiRequestError && error.status === 401) {
+        await reset();
+        return null;
+      }
+      throw error;
+    }
+  };
   const loadOverview = async (token: string, version: number) => {
     if (!token || version !== sessionVersion.current) return;
     setOverviewLoading(true);
@@ -260,6 +280,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         setPhone,
         accessToken,
         beneficiary,
+        saveProfile,
         overview,
         overviewLoading,
         overviewError,
