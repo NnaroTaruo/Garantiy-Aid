@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -19,6 +21,7 @@ export const config = {
   port,
   databaseUrl: required("DATABASE_URL"),
   authPepper,
+  documentStorageDir: resolve(fileURLToPath(new URL("../", import.meta.url)), process.env.DOCUMENT_STORAGE_DIR?.trim() || "storage/documents"),
   corsOrigins: new Set(
     (process.env.CORS_ORIGINS ?? "http://localhost:8765,http://127.0.0.1:8765")
       .split(",")

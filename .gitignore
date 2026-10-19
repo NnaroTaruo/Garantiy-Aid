@@ -13,5 +13,6 @@ backend/.env
 backend/.env.*
 !backend/.env.example
 backend/src/generated/prisma/
+backend/storage/
 .impeccable/review/
 *.log

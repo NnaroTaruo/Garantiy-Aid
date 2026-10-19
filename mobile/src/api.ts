@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import type { DocumentPickerAsset } from 'expo-document-picker';
 
 const configuredUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 export const API_URL =
@@ -15,9 +16,9 @@ export class ApiRequestError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, timeoutMs = 10_000): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${API_URL}${path}`, {
       ...init,
@@ -68,6 +69,18 @@ export type Beneficiary = {
 };
 
 export type ProfileUpdate = Pick<Beneficiary, 'firstName' | 'middleName' | 'lastName' | 'address' | 'barangayId'>;
+
+export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
+export type DocumentType = 'proof_of_residency' | 'valid_id' | 'other';
+export type BeneficiaryDocument = {
+  id: string;
+  docType: DocumentType;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  status: string;
+  createdAt: string;
+};
 
 export type ProgramEnrollment = {
   id: string;
@@ -311,4 +324,36 @@ export async function markNotificationRead(accessToken: string, id: string) {
       { method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}` } },
     )
   ).data;
+}
+
+export async function getDocuments(accessToken: string) {
+  return (await request<{ data: BeneficiaryDocument[] }>('/beneficiaries/me/documents', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })).data;
+}
+
+export async function uploadDocument(accessToken: string, asset: DocumentPickerAsset, docType: DocumentType) {
+  const extension = /\.([a-z0-9]+)$/i.exec(asset.name)?.[1].toLowerCase();
+  const mimeType = ({ pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png' } as Record<string, string>)[extension ?? ''];
+  if (!mimeType) throw new ApiRequestError('UNSUPPORTED_FILE_TYPE', 'Choose a PDF, JPEG, or PNG file.');
+  if ((asset.size ?? 0) > MAX_DOCUMENT_BYTES) throw new ApiRequestError('DOCUMENT_TOO_LARGE', 'Choose a file up to 5 MB.');
+  let contents: ArrayBuffer;
+  try {
+    const file = Platform.OS === 'web'
+      ? asset.file ?? await (await fetch(asset.uri)).blob()
+      : new (await import('expo-file-system')).File(asset.uri);
+    if (file.size > MAX_DOCUMENT_BYTES) throw new ApiRequestError('DOCUMENT_TOO_LARGE', 'Choose a file up to 5 MB.');
+    if (file.size === 0) throw new ApiRequestError('EMPTY_DOCUMENT', 'Choose a non-empty file.');
+    // Send bytes so native Blob handling cannot override the validated MIME header.
+    contents = await file.arrayBuffer();
+    if (contents.byteLength > MAX_DOCUMENT_BYTES) throw new ApiRequestError('DOCUMENT_TOO_LARGE', 'Choose a file up to 5 MB.');
+  } catch (error) {
+    if (error instanceof ApiRequestError) throw error;
+    throw new ApiRequestError('FILE_UNREADABLE', 'Choose the file again; it could not be read.');
+  }
+  return (await request<{ data: BeneficiaryDocument }>('/beneficiaries/me/documents', {
+    method: 'POST', body: contents,
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': mimeType,
+      'X-File-Name': encodeURIComponent(asset.name), 'X-Document-Type': docType },
+  }, 60_000)).data;
 }

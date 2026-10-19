@@ -49,6 +49,7 @@ model Beneficiary {
   walletAccount WalletAccount?
   transactions  Transaction[]
   notifications Notification[]
+  documents     BeneficiaryDocument[]
 
   @@index([barangayId])
   @@map("beneficiaries")
@@ -212,6 +213,24 @@ model Notification {
 
   @@index([beneficiaryId, createdAt])
   @@map("notifications")
+}
+
+model BeneficiaryDocument {
+  documentId    String      @id @default(uuid()) @map("document_id") @db.Uuid
+  beneficiaryId String      @map("beneficiary_id") @db.Uuid
+  docType       String      @map("doc_type") @db.VarChar(32)
+  originalName  String      @map("original_name") @db.VarChar(255)
+  filePath      String      @unique @map("file_path") @db.VarChar(64)
+  mimeType      String      @map("mime_type") @db.VarChar(64)
+  sizeBytes     Int         @map("size_bytes")
+  contentHash   String      @map("content_hash") @db.Char(64)
+  status        String      @default("received") @db.VarChar(32)
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
+
+  @@unique([beneficiaryId, docType, contentHash])
+  @@index([beneficiaryId, createdAt])
+  @@map("beneficiary_documents")
 }
 
 model OtpChallenge {

@@ -37,7 +37,7 @@ import {
 } from '../components';
 import { appointment as a, peso, useDemo } from '../state';
 import { colors as c, fonts } from '../theme';
-import { ApiRequestError, getBarangays, issueClaimPass, type Barangay, type Beneficiary, type ProfileUpdate, type ClaimPass as ClaimPassData } from '../api';
+import { ApiRequestError, getBarangays, issueClaimPass, MAX_DOCUMENT_BYTES, type Barangay, type Beneficiary, type ProfileUpdate, type BeneficiaryDocument, type DocumentType, type ClaimPass as ClaimPassData } from '../api';
 import {
   formatDate,
   formatDateTime,
@@ -101,7 +101,7 @@ export function DetailScreen() {
       content: <EnrollmentStatus />,
     },
     'enrollment-documents': {
-      title: t('Enrollment status', 'Kahimtang sa enrollment'),
+      title: t('Enrollment documents', 'Mga dokumento sa enrollment'),
       content: <EnrollmentDocuments />,
     },
     'security-privacy': {
@@ -987,80 +987,141 @@ function EnrollmentStatus() {
   );
 }
 function EnrollmentDocuments() {
-  const { t } = useDemo();
-  const [file, setFile] = useState('');
-  const [error, setError] = useState('');
+  const { beneficiary, t } = useDemo();
+  if (!beneficiary) return (
+    <>
+      <Notice>{t('Sign in to view your documents.', 'Pag-sign in para makita ang imong mga dokumento.')}</Notice>
+      <Button onPress={() => router.replace('/')}>{t('Go to sign in', 'Adto sa sign in')}</Button>
+    </>
+  );
+  return <DocumentUploads key={beneficiary.id} />;
+}
+
+function DocumentUploads() {
+  const { documents, documentsLoading, documentsError, refreshDocuments, submitDocument, t } = useDemo();
+  const [file, setFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [docType, setDocType] = useState<DocumentType>('proof_of_residency');
+  const [errorCode, setErrorCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [uploaded, setUploaded] = useState<BeneficiaryDocument | null>(null);
+  const busyRef = useRef(false);
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    void refreshDocuments();
+    return () => { active.current = false; };
+  }, []);
+  const categories = [
+    { value: 'proof_of_residency', label: t('Proof of residence', 'Pamatuod sa pinuy-anan') },
+    { value: 'valid_id', label: t('Identification document', 'Dokumento sa pagkaila') },
+    { value: 'other', label: t('Other requested document', 'Laing gipangayo nga dokumento') },
+  ] as const;
   const pick = async () => {
+    if (busyRef.current) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: ['application/pdf', 'image/jpeg', 'image/png'],
         multiple: false,
         copyToCacheDirectory: true,
+        base64: false,
       });
-      if (!result.canceled) {
+      if (active.current && !result.canceled) {
         const selected = result.assets[0];
-        if ((selected.size || 0) > 10 * 1024 * 1024) {
-          setError(
-            t('Choose a file smaller than 10 MB.', 'Pagpili og file nga ubos sa 10 MB.'),
-          );
+        setUploaded(null);
+        setFile(null);
+        if ((selected.size ?? 0) > MAX_DOCUMENT_BYTES) {
+          setErrorCode('DOCUMENT_TOO_LARGE');
           return;
         }
-        setFile(selected.name);
-        setError('');
+        setFile(selected);
+        setErrorCode('');
       }
     } catch {
-      setError(
-        t(
-          'Could not select a file. Try again.',
-          'Dili makapili og file. Sulayi pag-usab.',
-        ),
-      );
+      if (active.current) setErrorCode('SELECTION_FAILED');
     }
   };
+  const upload = async () => {
+    if (!file || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setErrorCode('');
+    setUploaded(null);
+    try {
+      const saved = await submitDocument(file, docType);
+      if (active.current && saved) {
+        setUploaded(saved);
+        setFile(null);
+      }
+    } catch (error) {
+      if (active.current) setErrorCode(error instanceof ApiRequestError ? error.code : 'UPLOAD_FAILED');
+    } finally {
+      busyRef.current = false;
+      if (active.current) setBusy(false);
+    }
+  };
+  const errorMessage = errorCode === 'DOCUMENT_TOO_LARGE' || errorCode === 'PAYLOAD_TOO_LARGE'
+    ? t('Choose a file up to 5 MB.', 'Pagpili og file nga hangtod 5 MB.')
+    : errorCode === 'UNSUPPORTED_FILE_TYPE' || errorCode === 'FILE_TYPE_MISMATCH'
+      ? t('Choose a valid PDF, JPEG, or PNG file with the matching extension.', 'Pagpili og hustong PDF, JPEG, o PNG nga file nga sakto ang extension.')
+      : errorCode === 'EMPTY_DOCUMENT'
+        ? t('The file is empty. Choose another file.', 'Walay sulod ang file. Pagpili og lain.')
+        : errorCode === 'SELECTION_FAILED' || errorCode === 'FILE_UNREADABLE'
+          ? t('The file could not be read. Choose it again.', 'Dili mabasa ang file. Pilia kini pag-usab.')
+          : errorCode === 'INVALID_FILE_NAME'
+            ? t('Choose a file with a simple name, up to 255 characters.', 'Pagpili og file nga yano ang ngalan, hangtod 255 ka karakter.')
+            : t('The upload could not be confirmed. Check your connection and try again.', 'Wala makumpirma ang upload. Susihon ang koneksyon ug sulayi pag-usab.');
   return (
     <>
-      <Badge>{t('Needs documents', 'Kinahanglan og dokumento')}</Badge>
-      <Txt variant="heading">
-        {t('Your application needs attention', 'Kinahanglan og pagtagad ang aplikasyon')}
-      </Txt>
-      <Txt variant="small">
-        {t(
-          'A facilitator must validate the missing requirement before approval.',
-          'Kinahanglan ivalidate sa facilitator ang kulang sa dili pa aprubahan.',
-        )}
-      </Txt>
-      <Card>
-        <DetailRow
-          icon={FileText}
-          label={t('Proof of residence', 'Pamatuod sa pinuy-anan')}
-          value={t('Status: Missing or unreadable', 'Kahimtang: Kulang o dili mabasa')}
-        />
-        <Txt variant="small">
-          {t(
-            'Bring the original document to your barangay or assigned DSWD facilitator.',
-            'Dad-a ang orihinal nga dokumento sa barangay o sa DSWD facilitator.',
-          )}
-        </Txt>
-      </Card>
       <Notice>
         {t(
-          'Local file selection is available for this preview. Files are not uploaded or submitted to staff.',
-          'Makapili og lokal nga file sa preview. Dili i-upload o isumite sa staff.',
+          'Upload a document requested by your facilitator. PDF, JPEG, or PNG, up to 5 MB. Receiving a file does not approve your enrollment.',
+          'I-upload ang dokumento nga gipangayo sa facilitator. PDF, JPEG, o PNG, hangtod 5 MB. Ang pagdawat sa file dili pag-apruba sa enrollment.',
         )}
       </Notice>
-      {error ? <Notice tone="error">{error}</Notice> : null}
-      {file ? (
+      <Txt variant="label">{t('Document category', 'Klase sa dokumento')}</Txt>
+      <View accessibilityRole="radiogroup" accessibilityLabel={t('Document category', 'Klase sa dokumento')} style={{ gap: 8 }}>
+        {categories.map((category) => (
+          <Pressable key={category.value} accessibilityRole="radio" disabled={busy}
+            accessibilityState={{ checked: docType === category.value, disabled: busy }}
+            onPress={() => { setDocType(category.value); setUploaded(null); }}
+            style={[styles.input, styles.row, { gap: 8 }, docType === category.value && { borderColor: c.primary, backgroundColor: c.primarySoft }]}
+          >
+            {docType === category.value && <Check size={18} color={c.primary} />}
+            <Txt style={{ flex: 1 }}>{category.label}</Txt>
+          </Pressable>
+        ))}
+      </View>
+      {file && <Card>
+        <Txt variant="label">{file.name}</Txt>
+        <Txt variant="small">{file.size === undefined ? t('Size will be checked before upload.', 'Susihon ang gidak-on sa dili pa i-upload.') : `${(file.size / 1024).toFixed(1)} KB`}</Txt>
+      </Card>}
+      {errorCode ? <Notice tone="error">{errorMessage}</Notice> : null}
+      {uploaded && (
         <Notice tone="success">
-          {t('Selected locally: ', 'Napili sa lokal: ')}
-          {file}
+          {t('Received: ', 'Nadawat: ')}{uploaded.originalName}
         </Notice>
-      ) : null}
-      <Button icon={FileText} onPress={pick}>
-        {t('Choose sample document', 'Pagpili og sample nga dokumento')}
+      )}
+      <Button variant="outline" icon={FileText} disabled={busy} onPress={() => void pick()}>
+        {file ? t('Choose another file', 'Pagpili og laing file') : t('Choose document', 'Pagpili og dokumento')}
       </Button>
-      <Button variant="outline" onPress={() => go('support')}>
-        {t('Contact facilitator', 'Kontaka ang facilitator')}
+      <Button loading={busy} disabled={!file} onPress={() => void upload()}>
+        {busy ? t('Uploading document…', 'Gi-upload ang dokumento…') : t('Upload document', 'I-upload ang dokumento')}
       </Button>
+      <Txt variant="heading">{t('Uploaded documents', 'Mga na-upload nga dokumento')}</Txt>
+      {(documentsLoading || (documents === null && !documentsError)) && <Notice>{t('Loading your documents…', 'Nag-load sa imong mga dokumento…')}</Notice>}
+      {documentsError && <Notice tone="error">{t('Your document list could not be loaded. Try refreshing it.', 'Wala ma-load ang listahan sa dokumento. Sulayi ang refresh.')}</Notice>}
+      {!documentsLoading && !documentsError && documents?.length === 0 && <Notice>{t('No documents uploaded yet.', 'Wala pay na-upload nga dokumento.')}</Notice>}
+      {(documents ?? []).map((document) => (
+        <Card key={document.id}>
+          <Txt variant="label">{document.originalName}</Txt>
+          <Txt variant="small">{categories.find((category) => category.value === document.docType)?.label ?? formatStatus(document.docType)}</Txt>
+          <Txt variant="small">{`${(document.sizeBytes / 1024).toFixed(1)} KB · ${formatDateTime(document.createdAt)}`}</Txt>
+          <Badge tone={document.status === 'verified' ? 'success' : document.status === 'rejected' ? 'error' : 'warning'}>
+            {document.status === 'received' ? t('Received · awaiting staff review', 'Nadawat · naghulat sa review sa staff') : formatStatus(document.status)}
+          </Badge>
+        </Card>
+      ))}
+      <Button variant="outline" loading={documentsLoading} disabled={busy} onPress={() => void refreshDocuments()}>{t('Refresh documents', 'I-refresh ang mga dokumento')}</Button>
       <Button variant="outline" onPress={() => go('enrollment-status')}>
         {t('View application status', 'Tan-awa ang kahimtang')}
       </Button>
@@ -1091,8 +1152,8 @@ function Privacy() {
       </Card>
       <Notice>
         {t(
-          'This preview keeps profile changes in memory and does not upload face photos. A production privacy notice and retention policy must be supplied before connecting the biometric service.',
-          'Ang preview nagtipig sa kausaban sa memory ug dili mo-upload sa nawong. Kinahanglan ang privacy notice sa dili pa ikonektar ang biometric service.',
+          'Profile edits and documents you upload are saved to GarantiyAid. Optional face enrollment and consent remain previews; captured enrollment photos stay on this device.',
+          'Ang kausaban sa profile ug mga dokumentong imong gi-upload gitipigan sa GarantiyAid. Preview pa ang opsyonal nga face enrollment ug consent; ang nakuha nga litrato sa enrollment magpabilin sa device.',
         )}
       </Notice>
       {revoked && (

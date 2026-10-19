@@ -45,6 +45,9 @@ During development, OTP codes are printed in the backend terminal and returned a
 - `POST /auth/logout`
 - `GET /beneficiaries/me`
 - `PATCH /beneficiaries/me`
+- `GET /beneficiaries/me/documents`
+- `POST /beneficiaries/me/documents`
+- `GET /beneficiaries/me/documents/:documentId/content`
 - `GET /beneficiaries/me/overview`
 - `GET /beneficiaries/me/wallet`
 - `GET /beneficiaries/me/notifications`
@@ -63,4 +66,12 @@ The notification inbox returns only the signed-in beneficiary's `in_app` records
 
 The seed adds a historical schedule message and a claim message labeled **Demo**, linked to its existing schedules. Re-running the seed preserves their read timestamps. Real schedule/claim messages must be created by the team's authorized staff backend, in the same transaction as the event they describe; it must check that the linked schedule belongs to the recipient. Automatic event generation, SMS, and OS push delivery are not implemented.
 
-Run `npm test` and `npm run typecheck` for the regular checks. With local PostgreSQL running and migrations applied, run `npm run test:integration` to verify notification ownership and read persistence, plus profile update validation, ownership, protected fields, service-area rules, and persistence across sessions. The checks create isolated test records and remove them afterward.
+Documents are stored privately in `backend/storage/documents/` by default. This directory is ignored by Git and is never served as a public static folder. Optional `DOCUMENT_STORAGE_DIR` changes the location; relative paths resolve from `backend/`. Uploaded files use server-generated UUID names, while PostgreSQL stores the original display name, category, MIME type, size, content hash, received status, and upload time. The signed-in beneficiary is both recipient and uploader for these self-service uploads; staff-user upload attribution remains part of the future shared backend.
+
+Uploads send the raw file bytes with `Content-Type: application/pdf`, `image/jpeg`, or `image/png`, plus `X-File-Name: <encodeURIComponent(originalName)>` and `X-Document-Type: proof_of_residency`, `valid_id`, or `other`. The limit is 5 MiB (shown as 5 MB in the app). Empty files, unsafe names, unsupported categories, and mismatched file signatures/extensions are rejected. A successful upload returns 201; retrying identical contents in the same category/account returns the existing record with 200. Concurrent retries are deduplicated by a database constraint, and failed writes remove their newly created file.
+
+The list and upload responses expose `id`, `docType`, `originalName`, `mimeType`, `sizeBytes`, `status`, and `createdAt`; storage keys and hashes stay private. Content downloads require the owner's bearer token and use attachment, `nosniff`, and no-store headers. Another account receives 404. Uploading does not change enrollment or verify identity. These are intake categories, not a determination of official requirements; staff review and authenticity/malware checks are not implemented.
+
+This storage approach targets one local API instance. Back up the database and private files together. Shared deployment, file preview UI, staff review, and account-deletion/retention cleanup remain later work; deleting a database record outside the API does not remove its file automatically.
+
+Run `npm test` and `npm run typecheck` for the regular checks. With local PostgreSQL running and migrations applied, run `npm run test:integration` to verify notifications, profile editing, and private document intake. Document checks use a fresh temporary directory and synthetic files; they cover invalid/oversized uploads, ownership, exact downloaded bytes, repeated/concurrent deduplication, no public storage route, and persistence across sessions. Test records and files are removed afterward.

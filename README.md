@@ -9,9 +9,9 @@ GarantiyAid is a capstone prototype for beneficiary registration, phone OTP auth
 
 Registration, generated OTP verification, persistent sessions, profile loading and editing, program enrollments, assigned schedules, QR pass issuance, read-only claim and wallet history, and in-app notifications use the backend database. Biometrics and SMS/push delivery remain previews. Staff scanning, claim approval, and notification creation still need integration with the team's web workflow. The wallet records assistance; it does not hold or transfer funds.
 
-The latest update lets beneficiaries save name, address, and barangay changes from **Profile > Edit profile**. Updates are validated, scoped to the signed-in account, and retained across logout/login. The saved notification inbox, details, and Home unread badge remain connected; the seed provides two labeled historical demo messages.
+The latest update connects **Profile > Enrollment documents** to private uploads and saved document records. PDF, JPEG, and PNG files up to 5 MB are accepted, with file-type checks, safe retries, account isolation, and received status. Profile edits, the notification inbox, and read state also persist across logout/login. Receiving a document does not approve enrollment; staff review remains separate.
 
-Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. The READMEs include the newer notification milestone.
+Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. The READMEs cover the newer notification, profile-editing, and document-upload milestones.
 
 If the PDF preview does not open, use the [direct PDF download](https://raw.githubusercontent.com/NnaroTaruo/Garantiy-Aid/main/output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf).
 

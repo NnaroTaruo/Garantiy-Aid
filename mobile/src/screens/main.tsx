@@ -497,6 +497,7 @@ export function ProfileScreen() {
           icon={FileText}
           onPress={() => go('enrollment-status')}
         />
+        <MenuRow title={t('Enrollment documents', 'Mga dokumento sa enrollment')} icon={FileText} onPress={() => go('enrollment-documents')} />
         <MenuRow
           title={t('Security & Privacy', 'Seguridad ug Privacy')}
           icon={ShieldCheck}

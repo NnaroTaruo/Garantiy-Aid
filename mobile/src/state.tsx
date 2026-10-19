@@ -7,12 +7,17 @@ import {
   getNotifications,
   markNotificationRead,
   updateProfile,
+  getDocuments,
+  uploadDocument,
   type Beneficiary,
   type BeneficiaryOverview,
   type WalletOverview,
   type BeneficiaryNotification,
   type ProfileUpdate,
+  type BeneficiaryDocument,
+  type DocumentType,
 } from './api';
+import type { DocumentPickerAsset } from 'expo-document-picker';
 import { clearStoredToken, getStoredToken, storeToken } from './session-storage';
 
 type Language = 'en' | 'bs';
@@ -46,6 +51,11 @@ type DemoState = {
   accessToken: string;
   beneficiary: Beneficiary | null;
   saveProfile: (input: ProfileUpdate) => Promise<Beneficiary | null>;
+  documents: BeneficiaryDocument[] | null;
+  documentsLoading: boolean;
+  documentsError: boolean;
+  refreshDocuments: () => Promise<void>;
+  submitDocument: (file: DocumentPickerAsset, docType: DocumentType) => Promise<BeneficiaryDocument | null>;
   overview: BeneficiaryOverview | null;
   overviewLoading: boolean;
   overviewError: boolean;
@@ -98,6 +108,10 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const [notificationsError, setNotificationsError] = useState(false);
   const sessionVersion = useRef(0);
   const renderedSessionVersion = sessionVersion.current;
+  const [documents, setDocuments] = useState<BeneficiaryDocument[] | null>(null);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [documentsError, setDocumentsError] = useState(false);
+  const documentRequest = useRef(0);
   const reset = async () => {
     sessionVersion.current += 1;
     setPhone('');
@@ -118,6 +132,9 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     setNotifications([]);
     setNotificationsLoading(false);
     setNotificationsError(false);
+    setDocuments(null);
+    setDocumentsLoading(false);
+    setDocumentsError(false);
     await clearStoredToken();
   };
   const applyBeneficiary = (beneficiary: Beneficiary) => {
@@ -221,6 +238,41 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       return false;
     }
   };
+  const loadDocuments = async (token: string, version: number) => {
+    if (!token || version !== sessionVersion.current) return;
+    const request = ++documentRequest.current;
+    setDocumentsLoading(true);
+    setDocumentsError(false);
+    try {
+      const next = await getDocuments(token);
+      if (version === sessionVersion.current && request === documentRequest.current) setDocuments(next);
+    } catch (error) {
+      if (version !== sessionVersion.current || request !== documentRequest.current) return;
+      if (error instanceof ApiRequestError && error.status === 401) await reset();
+      else setDocumentsError(true);
+    } finally {
+      if (version === sessionVersion.current && request === documentRequest.current) setDocumentsLoading(false);
+    }
+  };
+  const submitDocument = async (file: DocumentPickerAsset, docType: DocumentType) => {
+    const version = renderedSessionVersion;
+    if (!accessToken || version !== sessionVersion.current) return null;
+    try {
+      const saved = await uploadDocument(accessToken, file, docType);
+      if (version !== sessionVersion.current) return null;
+      setDocuments((previous) => [saved, ...(previous ?? []).filter((item) => item.id !== saved.id)]);
+      // A newer list request prevents an older pre-upload response hiding the saved document.
+      void loadDocuments(accessToken, version);
+      return saved;
+    } catch (error) {
+      if (version !== sessionVersion.current) return null;
+      if (error instanceof ApiRequestError && error.status === 401) {
+        await reset();
+        return null;
+      }
+      throw error;
+    }
+  };
   const restoreSession = async () => {
     const version = ++sessionVersion.current;
     setAuthLoading(true);
@@ -263,6 +315,9 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     setNotifications([]);
     setNotificationsLoading(false);
     setNotificationsError(false);
+    setDocuments(null);
+    setDocumentsLoading(false);
+    setDocumentsError(false);
     await storeToken(token);
     if (version !== sessionVersion.current) return;
     setAccessToken(token);
@@ -281,6 +336,11 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         accessToken,
         beneficiary,
         saveProfile,
+        documents,
+        documentsLoading,
+        documentsError,
+        refreshDocuments: () => loadDocuments(accessToken, renderedSessionVersion),
+        submitDocument,
         overview,
         overviewLoading,
         overviewError,

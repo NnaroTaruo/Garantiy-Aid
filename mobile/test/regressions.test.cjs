@@ -30,11 +30,12 @@ function deferred() {
 }
 
 class ApiRequestError extends Error {
-  constructor(status, fields) { super('Request failed'); this.status = status; this.fields = fields; }
+  constructor(status, fields, code = 'REQUEST_FAILED') { super('Request failed'); this.status = status; this.fields = fields; this.code = code; }
 }
 const beneficiary = (id) => ({ id, firstName: id, middleName: null, lastName: 'Test', contactNumber: '+639000000000' });
 const overview = (id) => ({ enrollments: [{ id }], nextSchedule: null });
 const wallet = (id) => ({ wallet: { id, balance: 1500 }, currentClaim: null, claims: [], transactions: [] });
+const document = (id) => ({ id, docType: 'proof_of_residency', originalName: `${id}.pdf`, mimeType: 'application/pdf', sizeBytes: 30, status: 'received', createdAt: '2026-10-20T01:00:00Z' });
 
 function provider(api = {}, storage = {}) {
   const slots = [];
@@ -66,6 +67,8 @@ function provider(api = {}, storage = {}) {
       getNotifications: async () => [],
       markNotificationRead: async (_token, id) => ({ id, readAt: '2026-10-20T01:00:00Z' }),
       updateProfile: async (token, input) => ({ ...beneficiary(token), ...input }),
+      getDocuments: async () => [],
+      uploadDocument: async () => document('saved'),
       ...api,
     },
     './session-storage': {
@@ -288,6 +291,103 @@ test('the profile API keeps server field errors for the form', async () => {
     (error) => error.status === 422 && error.fields.firstName === 'Use letters');
 });
 
+test('a pre-upload document list cannot hide a confirmed upload', async () => {
+  const oldList = deferred();
+  let loads = 0;
+  const render = provider({ getDocuments: () => ++loads === 1 ? oldList.promise : [document('saved')] });
+  await render().startSession('owner', beneficiary('owner'));
+  const loading = render().refreshDocuments();
+  assert.equal((await render().submitDocument({}, 'proof_of_residency')).id, 'saved');
+  oldList.resolve([]);
+  await loading;
+  assert.equal(render().documents[0].id, 'saved');
+  assert.equal(render().documentsLoading, false);
+});
+
+for (const outcome of ['logout', 'success', 'unauthorized']) {
+  test(`pending document lists and uploads are isolated after ${outcome}`, async () => {
+    const oldList = deferred(), oldUpload = deferred();
+    let loads = 0, writes = 0;
+    const render = provider({
+      getDocuments: (token) => { if (token !== 'old') return [document(token)]; loads++; return oldList.promise; },
+      uploadDocument: () => { writes++; return oldUpload.promise; },
+    });
+    await render().startSession('old', beneficiary('old'));
+    const staleRefresh = render().refreshDocuments, staleUpload = render().submitDocument;
+    const loading = staleRefresh(), uploading = staleUpload({}, 'other');
+    if (outcome === 'logout') await render().reset();
+    else { await render().startSession('new', beneficiary('new')); await render().refreshDocuments(); }
+    await staleRefresh();
+    assert.equal(await staleUpload({}, 'other'), null);
+    assert.equal(loads, 1);
+    assert.equal(writes, 1);
+    if (outcome === 'unauthorized') {
+      oldList.reject(new ApiRequestError(401)); oldUpload.reject(new ApiRequestError(401));
+    } else { oldList.resolve([document('old')]); oldUpload.resolve(document('old')); }
+    await Promise.all([loading, uploading]);
+    assert.equal(render().accessToken, outcome === 'logout' ? '' : 'new');
+    assert.equal(render().documents?.[0]?.id ?? null, outcome === 'logout' ? null : 'new');
+    assert.equal(render().documentsError, false);
+    assert.equal(render().documentsLoading, false);
+  });
+}
+
+test('document load errors can be retried and expired uploads clear the session', async () => {
+  let offline = true;
+  const render = provider({
+    getDocuments: async () => { if (offline) throw new Error('Offline'); return []; },
+    uploadDocument: async () => { throw new ApiRequestError(401); },
+  });
+  await render().startSession('owner', beneficiary('owner'));
+  await render().refreshDocuments();
+  assert.equal(render().documents, null);
+  assert.equal(render().documentsError, true);
+  offline = false;
+  await render().refreshDocuments();
+  assert.equal(render().documents.length, 0);
+  assert.equal(render().documentsError, false);
+  assert.equal(await render().submitDocument({}, 'other'), null);
+  assert.equal(render().accessToken, '');
+  assert.equal(render().documents, null);
+});
+
+for (const platform of ['web', 'android']) {
+  test(`${platform} uploads send file bytes with the correct headers and reject oversized/unreadable files`, async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4\nTest\n%%EOF').buffer;
+    let fileSize = bytes.byteLength, unreadable = false, requests = 0;
+    const source = loadSource('api.ts', {
+      'react-native': { Platform: { OS: platform } },
+      'expo-file-system': { File: class {
+        get size() { return fileSize; }
+        async arrayBuffer() { if (unreadable) throw new Error('No access'); return bytes; }
+      } },
+    }, {
+      process: { env: {} }, AbortController, setTimeout, clearTimeout,
+      fetch: async (_url, init) => {
+        requests++;
+        assert.equal(init.method, 'POST');
+        assert.equal(init.headers['Content-Type'], 'application/pdf');
+        assert.equal(init.headers['X-File-Name'], encodeURIComponent('Test ñ.pdf'));
+        assert.equal(init.headers['X-Document-Type'], 'proof_of_residency');
+        assert.equal(init.body.byteLength, bytes.byteLength);
+        return { status: 201, ok: true, json: async () => ({ data: document('saved') }) };
+      },
+    });
+    const file = { get size() { return fileSize; }, arrayBuffer: async () => { if (unreadable) throw new Error('No access'); return bytes; } };
+    const asset = { name: 'Test ñ.pdf', uri: 'file:///selected.pdf', ...(platform === 'web' ? { file } : {}) };
+    assert.equal((await source.uploadDocument('owner', asset, 'proof_of_residency')).id, 'saved');
+    fileSize = 5 * 1024 * 1024 + 1;
+    await assert.rejects(source.uploadDocument('owner', asset, 'proof_of_residency'), (error) => error.code === 'DOCUMENT_TOO_LARGE');
+    fileSize = 0;
+    await assert.rejects(source.uploadDocument('owner', asset, 'proof_of_residency'), (error) => error.code === 'EMPTY_DOCUMENT');
+    fileSize = bytes.byteLength;
+    unreadable = true;
+    await assert.rejects(source.uploadDocument('owner', asset, 'proof_of_residency'), (error) => error.code === 'FILE_UNREADABLE');
+    await assert.rejects(source.uploadDocument('owner', { name: 'test.exe' }, 'other'), (error) => error.code === 'UNSUPPORTED_FILE_TYPE');
+    assert.equal(requests, 1);
+  });
+}
+
 for (const newerToken of [null, 'new']) {
   test(`native storage keeps logout/login order with final token ${newerToken}`, async () => {
     const waitingWrite = deferred(), started = deferred();
@@ -499,5 +599,88 @@ test('the profile form retains failed edits, prevents double saves, and sends on
   assert.equal(saveButton(render()).props.disabled, true);
   assert.ok(JSON.stringify(render()).includes('Your profile was saved.'));
   assert.equal(field(render(), 'Mobile number'), undefined);
+  cleanup();
+});
+
+test('document selection, uploading, failure retry, and received status follow server confirmation', async () => {
+  let cursor = 0, effect, writes = 0, response = deferred(), sent, options;
+  let selection = { canceled: true };
+  const slots = [];
+  const state = {
+    beneficiary: beneficiary('owner'), documents: null, documentsLoading: true, documentsError: false,
+    t: (en) => en, refreshDocuments: async () => {},
+    submitDocument: async (file, docType) => {
+      writes++; sent = { file, docType };
+      const saved = await response.promise;
+      state.documents = [saved];
+      return saved;
+    },
+  };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const useState = (initial) => {
+    const index = cursor++;
+    if (!(index in slots)) slots[index] = initial;
+    return [slots[index], (value) => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }];
+  };
+  const source = loadSource('screens/details.tsx', {
+    react: { createElement: (type, props, ...children) => ({ type, props, children }), useState,
+      useRef: (initial) => useState({ current: initial })[0], useEffect: (fn) => { effect = fn; } },
+    'react-native': {}, 'expo-router': { useLocalSearchParams: () => ({ page: 'enrollment-documents' }) },
+    'expo-document-picker': { getDocumentAsync: async (input) => { options = input; return selection; } },
+    'react-native-qrcode-svg': 'QRCode', 'lucide-react-native': components, '../components': components,
+    '../state': { useDemo: () => state }, '../theme': { colors: {}, fonts: {} },
+    '../api': { ApiRequestError, MAX_DOCUMENT_BYTES: 5 * 1024 * 1024 },
+    '../format': { formatDateTime: (value) => value, formatStatus: (value) => value }, './main': { s: {} },
+  });
+  const form = source.DetailScreen().children[0].children[0].type();
+  const render = () => { cursor = 0; return form.type(); };
+  const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes)
+    : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  const button = (label) => nodes(render()).find((node) => node.type === 'Button' && node.children[0] === label);
+  const content = () => JSON.stringify(render());
+  render();
+  const cleanup = effect();
+  assert.ok(content().includes('Loading your documents'));
+  assert.ok(!content().includes('No documents uploaded yet.'));
+  state.documentsLoading = false; state.documentsError = true;
+  assert.ok(content().includes('Your document list could not be loaded.'));
+  assert.ok(!content().includes('No documents uploaded yet.'));
+  state.documentsError = false; state.documents = [];
+  assert.ok(content().includes('No documents uploaded yet.'));
+  button('Choose document').props.onPress();
+  await new Promise(setImmediate);
+  assert.equal(button('Upload document').props.disabled, true);
+  const selected = { name: 'Selected.pdf', uri: 'file:///selected.pdf', size: 30 };
+  selection = { canceled: false, assets: [selected] };
+  button('Choose document').props.onPress();
+  await new Promise(setImmediate);
+  assert.equal(options.copyToCacheDirectory, true);
+  assert.equal(options.base64, false);
+  const upload = button('Upload document');
+  upload.props.onPress(); upload.props.onPress();
+  assert.equal(writes, 1);
+  assert.ok(button('Uploading document…').props.loading);
+  assert.ok(!content().includes('Received: '));
+  response.reject(new ApiRequestError(500, undefined, 'NETWORK_ERROR'));
+  await new Promise(setImmediate);
+  assert.ok(content().includes('The upload could not be confirmed.'));
+  assert.ok(content().includes('Selected.pdf'));
+  selection = { canceled: false, assets: [{ ...selected, size: 5 * 1024 * 1024 + 1 }] };
+  button('Choose another file').props.onPress();
+  await new Promise(setImmediate);
+  assert.ok(content().includes('Choose a file up to 5 MB.'));
+  assert.equal(button('Upload document').props.disabled, true);
+  selection = { canceled: false, assets: [selected] };
+  button('Choose document').props.onPress();
+  await new Promise(setImmediate);
+  response = deferred();
+  button('Upload document').props.onPress();
+  assert.equal(sent.file.name, selected.name);
+  assert.equal(sent.docType, 'proof_of_residency');
+  response.resolve(document('confirmed'));
+  await new Promise(setImmediate);
+  assert.ok(content().includes('confirmed.pdf'));
+  assert.ok(content().includes('Received · awaiting staff review'));
+  assert.equal(button('Upload document').props.disabled, true);
   cleanup();
 });

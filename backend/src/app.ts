@@ -1,9 +1,12 @@
 import express, { type Request } from "express";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, unlink } from "node:fs/promises";
 import { config } from "./config.ts";
 import { prisma } from "./db.ts";
 import { ApiError } from "./errors.ts";
 import { createOtp, createQrToken, createSessionToken, hashSecret, secretMatches } from "./security.ts";
 import { parseOtpRequest, parseOtpVerification, parseProfileUpdate, parseRegistration, uuid } from "./validation.ts";
+import { DOCUMENT_MIME_TYPES, MAX_DOCUMENT_BYTES, documentStoragePath, parseDocumentUpload } from "./documents.ts";
 
 const OTP_LIFETIME_MS = 5 * 60 * 1000;
 const OTP_RESEND_WAIT_MS = 60 * 1000;
@@ -18,7 +21,7 @@ app.use((req, res, next) => {
   if (origin && config.corsOrigins.has(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-File-Name, X-Document-Type");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
   }
   if (req.method === "OPTIONS") return res.sendStatus(204);
@@ -239,6 +242,78 @@ app.patch("/beneficiaries/me", async (req, res) => {
     data,
   });
   res.json({ data: publicBeneficiary(updated) });
+});
+
+const documentFields = {
+  documentId: true, docType: true, originalName: true, mimeType: true,
+  sizeBytes: true, status: true, createdAt: true,
+} as const;
+
+app.get("/beneficiaries/me/documents", async (req, res) => {
+  const { beneficiary } = await requireBeneficiary(req);
+  const documents = await prisma.beneficiaryDocument.findMany({
+    where: { beneficiaryId: beneficiary.beneficiaryId },
+    select: documentFields,
+    orderBy: [{ createdAt: "desc" }, { documentId: "desc" }],
+  });
+  res.setHeader("Cache-Control", "private, no-store");
+  res.json({ data: documents.map(({ documentId, ...document }) => ({ id: documentId, ...document })) });
+});
+
+app.post("/beneficiaries/me/documents", async (req, res, next) => {
+  const { beneficiary } = await requireBeneficiary(req);
+  res.locals.beneficiaryId = beneficiary.beneficiaryId;
+  next();
+}, express.raw({ type: DOCUMENT_MIME_TYPES, limit: MAX_DOCUMENT_BYTES }), async (req, res) => {
+  const upload = parseDocumentUpload(req.get("Content-Type") ?? "", req.get("X-File-Name") ?? "", req.get("X-Document-Type") ?? "", req.body);
+  const beneficiaryId: string = res.locals.beneficiaryId;
+  const contentHash = createHash("sha256").update(upload.bytes).digest("hex");
+  const identity = { beneficiaryId_docType_contentHash: { beneficiaryId, docType: upload.docType, contentHash } };
+  const existing = await prisma.beneficiaryDocument.findUnique({ where: identity, select: documentFields });
+  if (existing) {
+    const { documentId, ...document } = existing;
+    return res.json({ data: { id: documentId, ...document } });
+  }
+  const documentId = randomUUID();
+  // ponytail: one API instance uses private local files; shared deployments need durable storage and retention cleanup.
+  const filePath = `${documentId}${upload.extension}`;
+  const absolutePath = documentStoragePath(config.documentStorageDir, filePath);
+  await mkdir(config.documentStorageDir, { recursive: true, mode: 0o700 });
+  const handle = await open(absolutePath, "wx", 0o600);
+  try {
+    try { await handle.writeFile(upload.bytes); } finally { await handle.close(); }
+    const { documentId: id, ...document } = await prisma.beneficiaryDocument.create({
+      data: { documentId, beneficiaryId, docType: upload.docType, originalName: upload.originalName,
+        filePath, mimeType: upload.mimeType, sizeBytes: upload.bytes.length, contentHash },
+      select: documentFields,
+    });
+    res.status(201).json({ data: { id, ...document } });
+  } catch (error) {
+    await unlink(absolutePath).catch((cleanupError) => console.error("Document upload cleanup failed:", cleanupError));
+    if (typeof error === "object" && error && "code" in error && error.code === "P2002") {
+      const saved = await prisma.beneficiaryDocument.findUnique({ where: identity, select: documentFields });
+      if (saved) {
+        const { documentId: id, ...document } = saved;
+        return res.json({ data: { id, ...document } });
+      }
+    }
+    throw error;
+  }
+});
+
+app.get("/beneficiaries/me/documents/:documentId/content", async (req, res, next) => {
+  const { beneficiary } = await requireBeneficiary(req);
+  const document = await prisma.beneficiaryDocument.findFirst({ where: {
+    documentId: uuid(req.params.documentId, "documentId"), beneficiaryId: beneficiary.beneficiaryId,
+  } });
+  if (!document) throw new ApiError(404, "DOCUMENT_NOT_FOUND", "Document not found.");
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.type(document.mimeType);
+  res.download(documentStoragePath(config.documentStorageDir, document.filePath), document.originalName, (error) => {
+    if (error) next((error as NodeJS.ErrnoException).code === "ENOENT"
+      ? new ApiError(404, "DOCUMENT_UNAVAILABLE", "The document file is unavailable.") : error);
+  });
 });
 
 app.get("/beneficiaries/me/overview", async (req, res) => {
@@ -481,12 +556,16 @@ app.post("/beneficiaries/me/claim-pass", async (req, res) => {
 
 app.use((_req, _res, next) => next(new ApiError(404, "NOT_FOUND", "Endpoint not found.")));
 
-app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(error);
   if (error instanceof ApiError) {
     return res.status(error.status).json({ error: { code: error.code, message: error.message, fields: error.fields } });
   }
   if (typeof error === "object" && error && "code" in error && error.code === "P2002") {
     return res.status(409).json({ error: { code: "DUPLICATE_VALUE", message: "That value is already in use." } });
+  }
+  if (typeof error === "object" && error && "type" in error && error.type === "entity.too.large") {
+    return res.status(413).json({ error: { code: "PAYLOAD_TOO_LARGE", message: "The request is too large. Document uploads must be at most 5 MB." } });
   }
   console.error(error);
   res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "Something went wrong." } });

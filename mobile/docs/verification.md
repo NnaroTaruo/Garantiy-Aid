@@ -1,5 +1,14 @@
 # Frontend verification
 
+Document-upload milestone checked on October 20, 2026:
+
+- Committed the preceding profile-editing milestone as `a993769` before starting uploads.
+- Applied `20261020010000_add_beneficiary_documents` and regenerated Prisma. The database/schema comparison reports no difference.
+- All 30 mobile tests, six backend tests, and three real-database integration checks pass. New checks cover file size/signatures/names, private access, exact binary downloads, repeated/concurrent deduplication, account isolation, logout/login persistence, delayed list/upload responses, failed-selection retry, upload activity, and success only after server confirmation.
+- Browser and Android API paths are exercised with controlled file objects. This is not a physical-device file-picker/upload test. The mobile UI check uses controlled React hooks.
+- Both TypeScript checks and web/Android exports pass. The SDK-compatible Expo file-system module is now an explicit dependency for reading native selected files; no backend upload dependency was added.
+- Browser automation reports no connected browser, so the visual walkthrough and actual Android file-provider behavior still require manual checks. Mobile file preview, official requirement rules, staff review, malware scanning, and retention/deletion workflows are not implemented.
+
 Profile editing milestone checked on October 20, 2026:
 
 - All 22 mobile regression tests, five backend tests, and both real-database integration checks pass. New checks cover editable-field validation, active service areas, protected fields, isolation between accounts, persistence across sessions, and delayed responses after logout/account switching.

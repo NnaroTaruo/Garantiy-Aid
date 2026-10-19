@@ -43,7 +43,8 @@ Skip optional face enrollment or choose demo capture. Camera access is requested
 - Database-backed program enrollment, Home claiming schedule, schedule details, queue number, and server-issued QR claim pass with empty/error/retry states. Staff identity verification and claim completion remain future work.
 - Database-backed read-only claim status, assistance-ledger balance, transaction history, and receipt details. The ledger records distributed assistance and does not transfer or hold funds.
 - Saved profile details and enrollment status from the backend. **Edit profile** saves names, address, and barangay, preserves entered values on failure, and shows confirmation after success. Mobile number, birth date, sex, and account status stay read-only.
-- Database-backed notification inbox, message details, unread badge, and persistent read state with retry on failure. Notification delivery preferences, missing-document file selection, and password/recovery screens remain previews.
+- Database-backed notification inbox, message details, unread badge, and persistent read state with retry on failure. Notification delivery preferences and password/recovery screens remain previews.
+- **Enrollment documents** selects and uploads PDF/JPEG/PNG files up to 5 MB, shows upload activity, retains a failed selection for retry, and lists saved file metadata and received status. Files are private to the signed-in account; staff review remains separate.
 - Sample assistant conversations for schedule, documents, face scan failure, and enrollment; the claim-status answer reads saved claim data, while staff support remains a preview.
 - Schedule update and expired-QR states.
 
@@ -52,6 +53,8 @@ Registration, authentication, beneficiary profiles, program enrollments, the nex
 To test notifications, apply the backend migration and seed, then sign in as `0917 555 0147`. Tap the Home bell to view two labeled demo messages. Open one, return to the list, then log out and sign in again: it stays read. The badge clears when all messages are read. New accounts have an empty inbox. Messages load at sign-in/restoration and when the inbox opens; use **Refresh notifications** for newer records. English/Bisaya messages use stored translations when supplied and English otherwise. Staff-generated events and SMS/OS push delivery still need integration; there is no background push connection.
 
 Profile test: sign in, open **Profile > Edit profile**, change a name or address, and tap **Save changes**. Return to Profile to see the saved values immediately. Log out and sign in again to confirm they persist. An invalid name highlights its field and retains the draft for correction. Choosing another barangay requires an active server-listed service area; loading/retry failures retain the existing selection. This feature uses the existing database fields and requires no new migration.
+
+Document-upload test: run `npm install` in `mobile/` to install the declared Expo file-system dependency. In `backend/`, run `npm run db:generate` and `npm run db:deploy` for the included document migration, then keep the API running. Sign in and open **Profile > Enrollment documents**. Choose a category, select a small sample PDF/image, and press **Upload document**. Confirm the received entry appears, then log out and sign in again to confirm the list persists. Re-upload the same file/category to check it produces one entry. A file over 5 MB must be rejected. Uploaded means received, not approved. The screen lists metadata and status; viewing the actual file and staff review are future UI work.
 
 ## Figma reference
 
