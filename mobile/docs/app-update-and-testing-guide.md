@@ -213,6 +213,6 @@ These items are not marked as completed services, even where a prototype screen 
 
 ### Project references
 
-Repository: [RonanStack24 / Garantiy-Aid](https://github.com/RonanStack24/Garantiy-Aid)
+Repository: [NnaroTaruo / Garantiy-Aid](https://github.com/NnaroTaruo/Garantiy-Aid)
 
 Implementation notes: `mobile/README.md`, `backend/README.md`, `mobile/docs/backend-contract.md`, and `mobile/docs/verification.md`. The editable source of this report is `mobile/docs/app-update-and-testing-guide.md`.
