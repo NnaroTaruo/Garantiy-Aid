@@ -8,6 +8,7 @@
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
+    "test:integration": "tsx --test test/notifications.integration.ts",
     "db:generate": "prisma generate",
     "db:local": "node scripts/local-db.mjs",
     "db:migrate": "prisma migrate dev",

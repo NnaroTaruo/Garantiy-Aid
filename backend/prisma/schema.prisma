@@ -48,6 +48,7 @@ model Beneficiary {
   claims        Claim[]
   walletAccount WalletAccount?
   transactions  Transaction[]
+  notifications Notification[]
 
   @@index([barangayId])
   @@map("beneficiaries")
@@ -113,6 +114,7 @@ model Schedule {
   distribution    Distribution @relation(fields: [distributionId], references: [distributionId], onDelete: Cascade)
   beneficiary     Beneficiary  @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
   claim           Claim?
+  notifications   Notification[]
 
   @@unique([distributionId, beneficiaryId])
   @@unique([distributionId, queueNumber])
@@ -189,6 +191,27 @@ model Transaction {
   @@index([walletId, createdAt])
   @@index([beneficiaryId, createdAt])
   @@map("transactions")
+}
+
+model Notification {
+  notificationId   String      @id @default(uuid()) @map("notification_id") @db.Uuid
+  beneficiaryId    String      @map("beneficiary_id") @db.Uuid
+  scheduleId       String?     @map("schedule_id") @db.Uuid
+  channel          String      @default("in_app") @db.VarChar(32)
+  title            String      @db.VarChar(160)
+  titleBs          String?     @map("title_bs") @db.VarChar(160)
+  message          String      @db.Text
+  messageBs        String?     @map("message_bs") @db.Text
+  notificationType String      @map("notification_type") @db.VarChar(32)
+  status           String      @default("sent") @db.VarChar(32)
+  sentAt           DateTime    @default(now()) @map("sent_at") @db.Timestamptz(6)
+  readAt           DateTime?   @map("read_at") @db.Timestamptz(6)
+  createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  beneficiary      Beneficiary @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
+  schedule         Schedule?   @relation(fields: [scheduleId], references: [scheduleId], onDelete: SetNull)
+
+  @@index([beneficiaryId, createdAt])
+  @@map("notifications")
 }
 
 model OtpChallenge {

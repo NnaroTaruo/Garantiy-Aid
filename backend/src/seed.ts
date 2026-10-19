@@ -88,7 +88,7 @@ const distribution = await prisma.distribution.upsert({
   },
 });
 
-await prisma.schedule.upsert({
+const schedule = await prisma.schedule.upsert({
   where: {
     distributionId_beneficiaryId: {
       distributionId: distribution.distributionId,
@@ -216,5 +216,34 @@ await prisma.transaction.upsert({
   },
 });
 
+for (const notice of [
+  {
+    notificationId: "a0260001-0000-4000-8000-000000000001",
+    scheduleId: schedule.scheduleId,
+    title: "Demo: Claiming schedule confirmed",
+    titleBs: "Demo: Nakumpirma ang iskedyul",
+    message: "Local test record: your October 2, 2026 slot was 9:00–10:00 AM, Queue #047 at Barangay Punta Princesa Hall. This is a historical schedule, not a new appointment.",
+    messageBs: "Lokal nga test record: ang imong oras niadtong Oktubre 2, 2026 kay 9:00–10:00 AM, Pila #047 sa Barangay Punta Princesa Hall. Karaan kini nga iskedyul, dili bag-ong appointment.",
+    notificationType: "schedule",
+    sentAt: new Date("2026-09-10T02:00:00.000Z"),
+  },
+  {
+    notificationId: "a0260001-0000-4000-8000-000000000002",
+    scheduleId: pastSchedule.scheduleId,
+    title: "Demo: Assistance recorded",
+    titleBs: "Demo: Narekord ang ayuda",
+    message: "Local test record: PHP 1,500 assistance was recorded on August 28, 2026. Open Wallet to view receipt GAI-2026-0828-032. No money was transferred by this app.",
+    messageBs: "Lokal nga test record: narekord ang PHP 1,500 nga ayuda niadtong Agosto 28, 2026. Ablihi ang Wallet para sa resibo GAI-2026-0828-032. Walay kuwarta nga gibalhin pinaagi niining app.",
+    notificationType: "claim",
+    sentAt: claimedAt,
+  },
+]) {
+  await prisma.notification.upsert({
+    where: { notificationId: notice.notificationId },
+    update: { ...notice, beneficiaryId: beneficiary.beneficiaryId, channel: "in_app", status: "sent" },
+    create: { ...notice, beneficiaryId: beneficiary.beneficiaryId, createdAt: notice.sentAt },
+  });
+}
+
 await prisma.$disconnect();
-console.info("Seeded the mobile beneficiary, schedule, completed claim, and wallet history.");
+console.info("Seeded the mobile beneficiary, schedule, completed claim, wallet history, and two demo notifications (existing read status preserved).");

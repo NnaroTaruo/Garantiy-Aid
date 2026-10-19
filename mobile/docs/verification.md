@@ -1,5 +1,14 @@
 # Frontend verification
 
+Notification milestone checked on October 20, 2026:
+
+- Applied `20261019010000_add_notifications`; Prisma's database/schema comparison reports no difference.
+- All 16 mobile regression tests and four backend tests pass. Notification checks cover failed-read retry, refresh/read races, delayed responses after logout or account changes, unauthorized sessions, saved-message rendering, translation fallback, and the Home unread indicator.
+- `npm run test:integration` in `backend/` passes against local PostgreSQL. It checks unauthenticated requests, per-beneficiary ownership, hidden SMS/queued/future messages, invalid/unknown IDs, idempotent reads, and read persistence after logout/new login. Its isolated records are removed afterward.
+- Both TypeScript checks and web/Android exports pass. Android export checks compilation, not an installed application.
+- Seeded two explicitly labeled historical demo notifications for `0917 555 0147`. Other accounts receive their own saved inbox or an empty state. Seed reruns preserve demo read status.
+- API health and the existing Metro preview at `http://127.0.0.1:8765/` return HTTP 200. Browser automation has no connected browser, so the notification walkthrough and visual/native-device checks remain pending. Automatic staff-event creation, SMS, and OS push are outside this milestone.
+
 Rechecked on October 19, 2026:
 
 - `npm test`: all 10 mobile regression tests pass. Controlled requests cover delayed wallet/schedule responses after logout, switching accounts, stale/current 401 responses, unfinished session restoration, native/browser token-storage ordering, storage failures, and Wallet loading/error/empty states.

@@ -180,6 +180,18 @@ export type WalletOverview = {
 
 type OtpResponse = { data: { expiresInSeconds?: number; developmentOtp?: string } };
 
+export type BeneficiaryNotification = {
+  id: string;
+  scheduleId: string | null;
+  title: string;
+  titleBs: string | null;
+  message: string;
+  messageBs: string | null;
+  notificationType: string;
+  sentAt: string;
+  readAt: string | null;
+};
+
 export async function getBarangays() {
   return (await request<{ data: Barangay[] }>('/barangays')).data;
 }
@@ -267,5 +279,22 @@ export async function getWalletOverview(accessToken: string) {
     await request<{ data: WalletOverview }>('/beneficiaries/me/wallet', {
       headers: { Authorization: `Bearer ${accessToken}` },
     })
+  ).data;
+}
+
+export async function getNotifications(accessToken: string) {
+  return (
+    await request<{ data: BeneficiaryNotification[] }>('/beneficiaries/me/notifications', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+  ).data;
+}
+
+export async function markNotificationRead(accessToken: string, id: string) {
+  return (
+    await request<{ data: { id: string; readAt: string } }>(
+      `/beneficiaries/me/notifications/${encodeURIComponent(id)}/read`,
+      { method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}` } },
+    )
   ).data;
 }

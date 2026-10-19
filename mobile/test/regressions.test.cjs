@@ -63,6 +63,8 @@ function provider(api = {}, storage = {}) {
       getCurrentBeneficiary: async (token) => beneficiary(token),
       getBeneficiaryOverview: async (token) => overview(token),
       getWalletOverview: async (token) => wallet(token),
+      getNotifications: async () => [],
+      markNotificationRead: async (_token, id) => ({ id, readAt: '2026-10-20T01:00:00Z' }),
       ...api,
     },
     './session-storage': {
@@ -159,6 +161,78 @@ test('logout cancels an unfinished session restoration', async () => {
   assert.equal(render().authLoading, false);
 });
 
+test('notification reads require server success and survive an older refresh response', async () => {
+  const waiting = deferred();
+  let reads = 0, loads = 0;
+  const render = provider({
+    getNotifications: async () => ++loads === 1 ? [{ id: 'message', readAt: null }] : waiting.promise,
+    markNotificationRead: async (_token, id) => {
+      if (++reads === 1) throw new Error('Offline');
+      return { id, readAt: 'saved-read' };
+    },
+  });
+  await render().startSession('owner', beneficiary('owner'));
+  assert.equal(await render().markRead('message'), false);
+  assert.equal(render().notifications[0].readAt, null);
+  const refreshing = render().refreshNotifications();
+  assert.equal(await render().markRead('message'), true);
+  waiting.resolve([{ id: 'message', readAt: null }]);
+  await refreshing;
+  assert.equal(render().notifications[0].readAt, 'saved-read');
+});
+
+for (const outcome of ['logout', 'success', 'unauthorized']) {
+  test(`pending notification loads and reads are isolated after ${outcome}`, async () => {
+    const waitingLoad = deferred(), waitingRead = deferred(), started = deferred();
+    let oldReads = 0, oldLoads = 0;
+    const render = provider({
+      getNotifications: (token) => {
+        if (token !== 'old') return [{ id: token, readAt: null }];
+        oldLoads++;
+        started.resolve();
+        return waitingLoad.promise;
+      },
+      markNotificationRead: () => { oldReads++; return waitingRead.promise; },
+    });
+    const signingIn = render().startSession('old', beneficiary('old'));
+    await started.promise;
+    const staleRead = render().markRead, staleRefresh = render().refreshNotifications;
+    const reading = staleRead('old');
+    if (outcome === 'logout') await render().reset();
+    else await render().startSession('new', beneficiary('new'));
+    assert.equal(await staleRead('old'), false);
+    await staleRefresh();
+    assert.equal(oldReads, 1);
+    assert.equal(oldLoads, 1);
+    waitingLoad.resolve([{ id: 'old', readAt: null }]);
+    if (outcome === 'unauthorized') waitingRead.reject(new ApiRequestError(401));
+    else waitingRead.resolve({ id: 'old', readAt: 'saved' });
+    await Promise.all([signingIn, reading]);
+    assert.equal(render().accessToken, outcome === 'logout' ? '' : 'new');
+    assert.equal(render().notifications.length, outcome === 'logout' ? 0 : 1);
+    if (outcome !== 'logout') assert.equal(render().notifications[0].id, 'new');
+    assert.equal(render().notificationsLoading, false);
+    assert.equal(render().notificationsError, false);
+  });
+}
+
+test('notification load errors can be retried; a current 401 clears account data', async () => {
+  let error = new Error('Offline');
+  const render = provider({ getNotifications: async () => { if (error) throw error; return []; } });
+  await render().startSession('owner', beneficiary('owner'));
+  assert.equal(render().notificationsError, true);
+  assert.equal(render().wallet.wallet.id, 'owner');
+  error = null;
+  await render().refreshNotifications();
+  assert.equal(render().notificationsError, false);
+  error = new ApiRequestError(401);
+  assert.equal(await render().markRead('message'), true);
+  await render().refreshNotifications();
+  assert.equal(render().accessToken, '');
+  assert.equal(render().wallet, null);
+  assert.equal(render().notifications.length, 0);
+});
+
 for (const newerToken of [null, 'new']) {
   test(`native storage keeps logout/login order with final token ${newerToken}`, async () => {
     const waitingWrite = deferred(), started = deferred();
@@ -247,4 +321,56 @@ test('wallet empty history appears only after a successful load', () => {
   state.walletError = false;
   state.wallet = wallet('empty');
   assert.ok(content().includes('No wallet history yet'));
+});
+
+test('notification screens render saved records, translations, and honest loading/error/empty states', () => {
+  const state = {
+    accessToken: 'owner', notifications: [], notificationsLoading: false, notificationsError: false,
+    refreshNotifications: async () => {}, markRead: async () => true, t: (en) => en,
+  };
+  let params = { page: 'notifications' };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const react = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useState: (initial) => [initial, () => {}], useRef: () => ({ current: false }), useEffect: () => {},
+  };
+  const mocks = {
+    react, 'react-native': { StyleSheet: { create: (styles) => styles } },
+    'expo-router': { useLocalSearchParams: () => params },
+    'lucide-react-native': components, '../components': components,
+    '../state': { useDemo: () => state, peso: String }, '../api': {},
+    '../format': { formatDateTime: (value) => value }, '../theme': { colors: {}, fonts: {} },
+  };
+  const source = loadSource('screens/details.tsx', {
+    ...mocks, 'expo-document-picker': {}, 'react-native-qrcode-svg': 'QRCode', './main': { s: {} },
+  });
+  const content = () => JSON.stringify(source.DetailScreen().children[0].children[0].type());
+  state.notificationsLoading = true;
+  assert.ok(content().includes('Loading notifications'));
+  assert.ok(!content().includes('No notifications yet'));
+  state.notificationsLoading = false;
+  state.notificationsError = true;
+  assert.ok(content().includes('Your notifications could not be loaded'));
+  assert.ok(!content().includes('No notifications yet'));
+  state.notificationsError = false;
+  assert.ok(content().includes('No notifications yet'));
+  state.notifications = [{
+    id: 'saved', title: 'Saved title', titleBs: 'Natipig nga titulo', message: 'Saved message',
+    messageBs: null, notificationType: 'other', sentAt: '2026-10-20T01:00:00Z', readAt: null,
+  }];
+  assert.ok(content().includes('Saved title. Unread'));
+  state.t = (_en, bs) => bs;
+  assert.ok(content().includes('Natipig nga titulo'));
+  assert.ok(content().includes('Saved message')); // Missing translation falls back to stored English.
+  params = { page: 'notification-details', id: 'saved' };
+  assert.ok(content().includes('Saved message'));
+  state.notifications = [];
+  assert.ok(content().includes('Dili magamit nga pahibalo.'));
+
+  const main = loadSource('screens/main.tsx', mocks);
+  state.t = (en) => en;
+  state.notifications = [{ id: 'saved', readAt: null }];
+  assert.ok(JSON.stringify(main.HomeScreen()).includes('Open notifications, unread messages'));
+  state.notifications[0].readAt = 'saved';
+  assert.ok(!JSON.stringify(main.HomeScreen()).includes('Open notifications, unread messages'));
 });

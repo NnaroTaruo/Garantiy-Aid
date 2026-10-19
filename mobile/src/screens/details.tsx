@@ -35,7 +35,7 @@ import {
   styles,
   Txt,
 } from '../components';
-import { appointment as a, notices, peso, useDemo } from '../state';
+import { appointment as a, peso, useDemo } from '../state';
 import { colors as c, fonts } from '../theme';
 import { ApiRequestError, getBarangays, issueClaimPass, type ClaimPass as ClaimPassData } from '../api';
 import {
@@ -488,40 +488,46 @@ function Receipt() {
 }
 
 function Notifications() {
-  const { readNotifications, markRead, t } = useDemo();
+  const { accessToken, notifications, notificationsLoading, notificationsError, refreshNotifications, t } = useDemo();
+  useEffect(() => { void refreshNotifications(); }, [accessToken]);
   const icons: Record<string, typeof Bell> = {
     schedule: CalendarDays,
     claim: CircleCheck,
     reminder: Bell,
     account: Info,
   };
+  if (!accessToken) return <Notice>{t('Sign in to view your notifications.', 'Pag-sign in para makita ang imong pahibalo.')}</Notice>;
   return (
     <>
-      <Notice>
-        {t(
-          'Sample notifications · No SMS or push service is connected.',
-          'Sample nga pahibalo · Wala pay SMS o push service.',
-        )}
-      </Notice>
-      {notices.map((notice) => {
-        const Icon = icons[notice.kind];
+      {notificationsLoading && <Notice>{t('Loading notifications…', 'Nag-load sa mga pahibalo…')}</Notice>}
+      {notificationsError && (
+        <Notice tone="error">
+          {t('Your notifications could not be loaded. Try again.', 'Wala ma-load ang imong mga pahibalo. Sulayi pag-usab.')}
+        </Notice>
+      )}
+      {!notificationsLoading && !notificationsError && notifications.length === 0 && (
+        <Notice>{t('No notifications yet. Schedule and claim updates will appear here.', 'Wala pay pahibalo. Dinhi makita ang mga update sa iskedyul ug claim.')}</Notice>
+      )}
+      <Button variant="outline" loading={notificationsLoading} onPress={() => void refreshNotifications()}>
+        {notificationsError ? t('Try again', 'Sulayi pag-usab') : t('Refresh notifications', 'I-refresh ang mga pahibalo')}
+      </Button>
+      {notifications.map((notice) => {
+        const Icon = icons[notice.notificationType] ?? Bell;
         return (
           <Pressable
             accessibilityRole="button"
+            accessibilityLabel={`${t(notice.title, notice.titleBs ?? notice.title)}. ${notice.readAt ? t('Read', 'Nabasa na') : t('Unread', 'Wala pa mabasa')}`}
             key={notice.id}
-            onPress={() => {
-              markRead(notice.id);
-              go('notification-details', { id: notice.id });
-            }}
+            onPress={() => go('notification-details', { id: notice.id })}
           >
             <Card style={{ padding: 16, gap: 8 }}>
               <View style={[styles.row, { alignItems: 'flex-start' }]}>
                 <Icon
                   size={19}
                   color={
-                    notice.kind === 'claim'
+                    notice.notificationType === 'claim'
                       ? c.green
-                      : notice.kind === 'reminder'
+                      : notice.notificationType === 'reminder'
                         ? c.amber
                         : c.primary
                   }
@@ -529,9 +535,9 @@ function Notifications() {
                 <View style={{ flex: 1, gap: 6 }}>
                   <View style={styles.row}>
                     <Txt variant="label" style={{ flex: 1 }}>
-                      {t(notice.title, notice.titleBs)}
+                      {t(notice.title, notice.titleBs ?? notice.title)}
                     </Txt>
-                    {!readNotifications.includes(notice.id) && (
+                    {!notice.readAt && (
                       <View
                         style={{
                           width: 7,
@@ -542,9 +548,9 @@ function Notifications() {
                       />
                     )}
                   </View>
-                  <Txt variant="small">{t(notice.body, notice.bodyBs)}</Txt>
-                  <Txt variant="small" style={{ fontSize: 10 }}>
-                    {notice.date}
+                  <Txt variant="small">{t(notice.message, notice.messageBs ?? notice.message)}</Txt>
+                  <Txt variant="small">
+                    {formatDateTime(notice.sentAt)}
                   </Txt>
                 </View>
               </View>
@@ -557,29 +563,61 @@ function Notifications() {
 }
 function NotificationDetails() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { t } = useDemo();
-  const notice = notices.find((item) => item.id === id);
+  const { accessToken, notifications, notificationsLoading, notificationsError, refreshNotifications, markRead, t } = useDemo();
+  const notice = notifications.find((item) => item.id === id);
+  const [saving, setSaving] = useState(false);
+  const [readError, setReadError] = useState(false);
+  const [readAttempt, setReadAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setReadError(false);
+    setSaving(false);
+    if (notice && !notice.readAt) {
+      setSaving(true);
+      void markRead(notice.id).catch(() => false).then((saved) => {
+        if (active) {
+          setSaving(false);
+          setReadError(!saved);
+        }
+      });
+    }
+    return () => { active = false; };
+  }, [notice?.id, accessToken, readAttempt]);
+  if (!accessToken) return <Notice>{t('Sign in to view your notifications.', 'Pag-sign in para makita ang imong pahibalo.')}</Notice>;
+  if (!notice && notificationsLoading) return <Notice>{t('Loading notifications…', 'Nag-load sa mga pahibalo…')}</Notice>;
+  if (!notice && notificationsError) return (
+    <>
+      <Notice tone="error">{t('Your notifications could not be loaded.', 'Wala ma-load ang imong mga pahibalo.')}</Notice>
+      <Button onPress={() => void refreshNotifications()}>{t('Try again', 'Sulayi pag-usab')}</Button>
+    </>
+  );
   if (!notice)
     return (
       <Notice>{t('Notification unavailable.', 'Dili magamit nga pahibalo.')}</Notice>
     );
   return (
     <>
-      <Badge>{t('Sample notification', 'Sample nga pahibalo')}</Badge>
-      <Txt variant="title">{t(notice.title, notice.titleBs)}</Txt>
-      <Txt variant="small">{notice.date}</Txt>
+      <Badge tone={notice.readAt ? 'success' : 'warning'}>
+        {notice.readAt ? t('Read', 'Nabasa na') : t('Unread', 'Wala pa mabasa')}
+      </Badge>
+      <Txt variant="title">{t(notice.title, notice.titleBs ?? notice.title)}</Txt>
+      <Txt variant="small">{formatDateTime(notice.sentAt)}</Txt>
       <Card>
-        <Txt>{t(notice.body, notice.bodyBs)}</Txt>
+        <Txt>{t(notice.message, notice.messageBs ?? notice.message)}</Txt>
       </Card>
-      <Button
-        onPress={() =>
-          notice.kind === 'claim' ? router.replace('/(tabs)/wallet') : go('schedule')
-        }
-      >
-        {notice.kind === 'claim'
-          ? t('View my wallet', 'Tan-awa akong wallet')
-          : t('View claiming schedule', 'Tan-awa ang iskedyul')}
-      </Button>
+      {saving && <Txt variant="small">{t('Saving read status…', 'Gitipigan ang kahimtang sa pagbasa…')}</Txt>}
+      {readError && (
+        <>
+          <Notice tone="error">{t('Read status was not saved. Try again.', 'Wala matipig ang kahimtang sa pagbasa. Sulayi pag-usab.')}</Notice>
+          <Button onPress={() => setReadAttempt((value) => value + 1)}>{t('Retry saving', 'Sulayi pagtipig pag-usab')}</Button>
+        </>
+      )}
+      {notice.notificationType === 'claim' && (
+        <Button onPress={() => router.replace('/(tabs)/wallet')}>{t('View my wallet', 'Tan-awa akong wallet')}</Button>
+      )}
+      {(notice.notificationType === 'schedule' || notice.notificationType === 'reminder') && (
+        <Button onPress={() => go('schedule')}>{t('View current schedule', 'Tan-awa ang kasamtangang iskedyul')}</Button>
+      )}
     </>
   );
 }
@@ -768,7 +806,7 @@ function NotificationSettings() {
             set: setSms,
           },
           {
-            label: t('App notifications', 'Mga pahibalo sa app'),
+            label: t('Push notifications', 'Mga push nga pahibalo'),
             value: push,
             set: setPush,
           },
@@ -789,8 +827,8 @@ function NotificationSettings() {
       </Card>
       <Notice>
         {t(
-          'Preview preferences only. No notifications are sent, and settings reset when this screen closes.',
-          'Mga gusto sa preview lamang. Walay pahibalo ipadala; mareset kon sirad-an ang screen.',
+          'Preview delivery preferences. SMS and push are not connected; these switches reset when this screen closes. Saved in-app messages remain available in Notifications.',
+          'Preview sa delivery preferences. Wala pay SMS ug push; mareset kini nga switches kon sirad-an ang screen. Ang natipig nga mensahe makita gihapon sa Notifications.',
         )}
       </Notice>
     </>

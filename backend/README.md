@@ -1,6 +1,6 @@
 # Garantiy-Aid backend
 
-This is the real-data API for the beneficiary mobile app. It implements account access, the signed-in beneficiary profile, program enrollments, the next assigned distribution schedule, scoped QR claim-pass issuance, and read-only claim and assistance-ledger history. Data is stored in PostgreSQL through Prisma.
+This is the real-data API for the beneficiary mobile app. It implements account access, the signed-in beneficiary profile, program enrollments, the next assigned distribution schedule, scoped QR claim-pass issuance, read-only claim and assistance-ledger history, and saved in-app notifications. Data is stored in PostgreSQL through Prisma.
 
 ## Run locally
 
@@ -46,6 +46,8 @@ During development, OTP codes are printed in the backend terminal and returned a
 - `GET /beneficiaries/me`
 - `GET /beneficiaries/me/overview`
 - `GET /beneficiaries/me/wallet`
+- `GET /beneficiaries/me/notifications`
+- `PATCH /beneficiaries/me/notifications/:notificationId/read`
 - `POST /beneficiaries/me/claim-pass`
 
 Protected endpoints use `Authorization: Bearer <accessToken>`. Access tokens are random, stored only as hashes, expire after seven days, and are revoked by logout.
@@ -53,3 +55,9 @@ Protected endpoints use `Authorization: Bearer <accessToken>`. Access tokens are
 Claim passes are opaque, distribution-scoped values returned only when issued. PostgreSQL stores a keyed hash rather than the raw QR value. Issuing a replacement revokes the previous active pass, and each pass expires at the end of its assigned schedule. Staff-side scanning and claim approval remain separate work.
 
 `GET /beneficiaries/me/wallet` returns the signed-in beneficiary's wallet-account summary, current scheduled claim status, claim history, and posted transaction receipts. The wallet is an assistance ledger for recorded distributions; it does not hold funds or initiate transfers. Mobile access is read-only. A later staff workflow must verify a claim and create its claim and transaction records together in one atomic database operation.
+
+The notification inbox returns only the signed-in beneficiary's `in_app` records with delivery `status: sent` and a `sentAt` timestamp that has arrived, newest first. Read state is separate: `readAt: null` means unread. The PATCH endpoint preserves the first read timestamp on retries and returns 404 for another account's message, an unknown ID, or a message that is not in the inbox. Malformed UUIDs return 422. There is no beneficiary endpoint for creating messages or changing delivery status.
+
+The seed adds a historical schedule message and a claim message labeled **Demo**, linked to its existing schedules. Re-running the seed preserves their read timestamps. Real schedule/claim messages must be created by the team's authorized staff backend, in the same transaction as the event they describe; it must check that the linked schedule belongs to the recipient. Automatic event generation, SMS, and OS push delivery are not implemented.
+
+Run `npm test` and `npm run typecheck` for the regular checks. With local PostgreSQL running and migrations applied, run `npm run test:integration` to verify notification ownership, hidden delivery states, idempotent reads, and logout/login persistence against the real database. It creates isolated test records and removes them afterward.

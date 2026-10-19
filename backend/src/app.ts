@@ -3,7 +3,7 @@ import { config } from "./config.ts";
 import { prisma } from "./db.ts";
 import { ApiError } from "./errors.ts";
 import { createOtp, createQrToken, createSessionToken, hashSecret, secretMatches } from "./security.ts";
-import { parseOtpRequest, parseOtpVerification, parseRegistration } from "./validation.ts";
+import { parseOtpRequest, parseOtpVerification, parseRegistration, uuid } from "./validation.ts";
 
 const OTP_LIFETIME_MS = 5 * 60 * 1000;
 const OTP_RESEND_WAIT_MS = 60 * 1000;
@@ -377,6 +377,40 @@ app.get("/beneficiaries/me/wallet", async (req, res) => {
         })) ?? [],
     },
   });
+});
+
+app.get("/beneficiaries/me/notifications", async (req, res) => {
+  const { beneficiary } = await requireBeneficiary(req);
+  const notifications = await prisma.notification.findMany({
+    where: {
+      beneficiaryId: beneficiary.beneficiaryId,
+      channel: "in_app",
+      status: "sent",
+      sentAt: { lte: new Date() },
+    },
+    orderBy: [{ sentAt: "desc" }, { notificationId: "desc" }],
+    select: {
+      notificationId: true, scheduleId: true, title: true, titleBs: true,
+      message: true, messageBs: true, notificationType: true, sentAt: true, readAt: true,
+    },
+  });
+  res.json({ data: notifications.map(({ notificationId, ...notice }) => ({ id: notificationId, ...notice })) });
+});
+
+app.patch("/beneficiaries/me/notifications/:notificationId/read", async (req, res) => {
+  const { beneficiary } = await requireBeneficiary(req);
+  const where = {
+    notificationId: uuid(req.params.notificationId, "notificationId"),
+    beneficiaryId: beneficiary.beneficiaryId,
+    channel: "in_app",
+    status: "sent",
+    sentAt: { lte: new Date() },
+  };
+  // Keep the first read timestamp, including concurrent or retried requests.
+  await prisma.notification.updateMany({ where: { ...where, readAt: null }, data: { readAt: new Date() } });
+  const notice = await prisma.notification.findFirst({ where, select: { notificationId: true, readAt: true } });
+  if (!notice) throw new ApiError(404, "NOTIFICATION_NOT_FOUND", "Notification not found.");
+  res.json({ data: { id: notice.notificationId, readAt: notice.readAt } });
 });
 
 app.post("/beneficiaries/me/claim-pass", async (req, res) => {

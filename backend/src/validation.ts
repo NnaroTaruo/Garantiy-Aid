@@ -61,10 +61,10 @@ function dateOnly(value: unknown): Date {
   return date;
 }
 
-function uuid(value: unknown, field: string): string {
+export function uuid(value: unknown, field: string): string {
   if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
     throw new ApiError(422, "VALIDATION_ERROR", "Please correct the highlighted fields.", {
-      [field]: "Select a valid barangay.",
+      [field]: "Enter a valid ID.",
     });
   }
   return value;

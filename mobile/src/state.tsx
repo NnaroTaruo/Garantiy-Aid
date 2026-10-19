@@ -4,9 +4,12 @@ import {
   getBeneficiaryOverview,
   getCurrentBeneficiary,
   getWalletOverview,
+  getNotifications,
+  markNotificationRead,
   type Beneficiary,
   type BeneficiaryOverview,
   type WalletOverview,
+  type BeneficiaryNotification,
 } from './api';
 import { clearStoredToken, getStoredToken, storeToken } from './session-storage';
 
@@ -60,8 +63,11 @@ type DemoState = {
   setFaceEnrolled: (value: boolean) => void;
   consentGiven: boolean;
   setConsentGiven: (value: boolean) => void;
-  readNotifications: string[];
-  markRead: (id: string) => void;
+  notifications: BeneficiaryNotification[];
+  notificationsLoading: boolean;
+  notificationsError: boolean;
+  refreshNotifications: () => Promise<void>;
+  markRead: (id: string) => Promise<boolean>;
   reset: () => Promise<void>;
   t: (english: string, bisaya: string) => string;
 };
@@ -84,7 +90,9 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     useState<RegistrationInfo>(emptyRegistration);
   const [faceEnrolled, setFaceEnrolled] = useState(false);
   const [consentGiven, setConsentGiven] = useState(false);
-  const [readNotifications, setReadNotifications] = useState<string[]>([]);
+  const [notifications, setNotifications] = useState<BeneficiaryNotification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState(false);
   const sessionVersion = useRef(0);
   const renderedSessionVersion = sessionVersion.current;
   const reset = async () => {
@@ -104,7 +112,9 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     setRegistrationState(emptyRegistration);
     setFaceEnrolled(false);
     setConsentGiven(false);
-    setReadNotifications([]);
+    setNotifications([]);
+    setNotificationsLoading(false);
+    setNotificationsError(false);
     await clearStoredToken();
   };
   const applyBeneficiary = (beneficiary: Beneficiary) => {
@@ -153,6 +163,44 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       if (version === sessionVersion.current) setWalletLoading(false);
     }
   };
+  const loadNotifications = async (token: string, version: number) => {
+    if (!token || version !== sessionVersion.current) return;
+    setNotificationsLoading(true);
+    setNotificationsError(false);
+    try {
+      const nextNotifications = await getNotifications(token);
+      if (version === sessionVersion.current) {
+        // A refresh started before a successful read must not make it unread again.
+        setNotifications((previous) => {
+          const readTimes = new Map(previous.map((notice) => [notice.id, notice.readAt]));
+          return nextNotifications.map((notice) => ({ ...notice, readAt: notice.readAt ?? readTimes.get(notice.id) ?? null }));
+        });
+      }
+    } catch (error) {
+      if (version !== sessionVersion.current) return;
+      if (error instanceof ApiRequestError && error.status === 401) await reset();
+      else setNotificationsError(true);
+    } finally {
+      if (version === sessionVersion.current) setNotificationsLoading(false);
+    }
+  };
+  const markRead = async (id: string) => {
+    const version = renderedSessionVersion;
+    if (!accessToken || version !== sessionVersion.current) return false;
+    try {
+      const saved = await markNotificationRead(accessToken, id);
+      if (version !== sessionVersion.current) return false;
+      setNotifications((previous) => previous.map((notice) =>
+        notice.id === saved.id ? { ...notice, readAt: saved.readAt } : notice,
+      ));
+      return true;
+    } catch (error) {
+      if (version === sessionVersion.current && error instanceof ApiRequestError && error.status === 401) {
+        await reset();
+      }
+      return false;
+    }
+  };
   const restoreSession = async () => {
     const version = ++sessionVersion.current;
     setAuthLoading(true);
@@ -168,7 +216,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       if (version !== sessionVersion.current) return;
       setAccessToken(token);
       applyBeneficiary(beneficiary);
-      await Promise.all([loadOverview(token, version), loadWallet(token, version)]);
+      await Promise.all([loadOverview(token, version), loadWallet(token, version), loadNotifications(token, version)]);
     } catch (error) {
       if (version !== sessionVersion.current) return;
       if (error instanceof ApiRequestError && error.status === 401) {
@@ -192,13 +240,16 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     setWallet(null);
     setWalletLoading(false);
     setWalletError(false);
+    setNotifications([]);
+    setNotificationsLoading(false);
+    setNotificationsError(false);
     await storeToken(token);
     if (version !== sessionVersion.current) return;
     setAccessToken(token);
     setAuthLoading(false);
     setAuthError(false);
     applyBeneficiary(beneficiary);
-    await Promise.all([loadOverview(token, version), loadWallet(token, version)]);
+    await Promise.all([loadOverview(token, version), loadWallet(token, version), loadNotifications(token, version)]);
   };
   return (
     <Context.Provider
@@ -230,11 +281,11 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         setFaceEnrolled,
         consentGiven,
         setConsentGiven,
-        readNotifications,
-        markRead: (id) =>
-          setReadNotifications((previous) =>
-            previous.includes(id) ? previous : [...previous, id],
-          ),
+        notifications,
+        notificationsLoading,
+        notificationsError,
+        refreshNotifications: () => loadNotifications(accessToken, renderedSessionVersion),
+        markRead,
         reset,
         t: (en, bs) => (language === 'en' ? en : bs),
       }}
@@ -260,34 +311,5 @@ export const appointment = {
   amount: 1500,
   reference: 'GAI-2025-0612-047',
 };
-export const notices = [
-  {
-    id: 'schedule',
-    title: 'Claiming schedule confirmed',
-    titleBs: 'Nakumpirma ang iskedyul',
-    body: 'Your slot: July 10, 9:00–10:00 AM, Queue #047. Punta Princesa Hall.',
-    bodyBs: 'Imong oras: Hulyo 10, 9:00–10:00 AM, Pila #047. Punta Princesa Hall.',
-    date: 'July 2, 2025 · 10:00 AM',
-    kind: 'schedule',
-  },
-  {
-    id: 'reminder',
-    title: 'Reminder: Claim this week',
-    titleBs: 'Pahinumdom: Claim karong semanaha',
-    body: 'Your claiming window is July 10, 9:00–10:00 AM. Don’t forget your QR pass.',
-    bodyBs: 'Imong pag-claim kay Hulyo 10, 9:00–10:00 AM. Ayaw kalimti ang QR pass.',
-    date: 'July 8, 2025 · 8:00 AM',
-    kind: 'reminder',
-  },
-  {
-    id: 'account',
-    title: 'Account verified',
-    titleBs: 'Naverify ang account',
-    body: 'Welcome to GarantiyAid, Maria. Your registration is complete.',
-    bodyBs: 'Maayong pag-abot sa GarantiyAid, Maria. Nahuman na ang pagparehistro.',
-    date: 'May 20, 2025 · 2:30 PM',
-    kind: 'account',
-  },
-];
 export const peso = (amount: number) =>
   `₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;

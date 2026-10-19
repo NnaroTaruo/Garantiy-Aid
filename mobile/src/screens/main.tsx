@@ -32,7 +32,7 @@ import {
   styles,
   Txt,
 } from '../components';
-import { notices, peso, useDemo } from '../state';
+import { peso, useDemo } from '../state';
 import { ApiRequestError, logout, type WalletTransaction } from '../api';
 import {
   formatDate,
@@ -51,7 +51,7 @@ export function HomeScreen() {
     overviewLoading,
     overviewError,
     refreshOverview,
-    readNotifications,
+    notifications,
     t,
   } = useDemo();
   const schedule = overview?.nextSchedule;
@@ -67,12 +67,14 @@ export function HomeScreen() {
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t('Open notifications', 'Ablihi ang pahibalo')}
+          accessibilityLabel={notifications.some((notice) => !notice.readAt)
+            ? t('Open notifications, unread messages', 'Ablihi ang pahibalo, adunay wala pa mabasa')
+            : t('Open notifications', 'Ablihi ang pahibalo')}
           onPress={() => go('notifications')}
           style={styles.iconButton}
         >
           <Bell size={22} color={c.muted} />
-          {readNotifications.length < notices.length && <View style={s.unreadDot} />}
+          {notifications.some((notice) => !notice.readAt) && <View style={s.unreadDot} />}
         </Pressable>
         <View style={{ marginLeft: 'auto' }}>
           <LanguageToggle />
