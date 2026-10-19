@@ -419,8 +419,8 @@ export function AccountSetup() {
       </Card>
       <Notice>
         {t(
-          'Prototype preview: your entries stay only in this app session and are not uploaded.',
-          'Prototype preview: ang imong gisulod magpabilin lamang niining app session ug dili i-upload.',
+          'Your registration details will be sent to GarantiyAid and saved when you create your account.',
+          'Ipadala ug tipigan sa GarantiyAid ang imong detalye sa pagparehistro sa paghimo sa imong account.',
         )}
       </Notice>
     </Page>

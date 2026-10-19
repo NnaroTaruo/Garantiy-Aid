@@ -11,8 +11,14 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MessageCircle, Phone, Send } from 'lucide-react-native';
 import { go, LanguageToggle, Notice, styles, Txt } from '../components';
-import { useDemo } from '../state';
-import { formatDate, formatQueueNumber, formatTimeSlot } from '../format';
+import { peso, useDemo } from '../state';
+import {
+  formatDate,
+  formatDateTime,
+  formatQueueNumber,
+  formatStatus,
+  formatTimeSlot,
+} from '../format';
 import { colors as c } from '../theme';
 
 type Message = { id: number; role: 'user' | 'assistant'; en: string; bs: string };
@@ -23,7 +29,7 @@ const greeting: Message = {
   bs: 'Kumusta! Ako ang assistant sa GarantiyAid. Makatabang ko sa imong iskedyul, dad-on, ug kahimtang sa claim. Unsay gusto nimong mahibal-an?',
 };
 export function HelpScreen() {
-  const { t, claimCompleted, overview } = useDemo();
+  const { t, overview, wallet, walletLoading, walletError } = useDemo();
   const [messages, setMessages] = useState<Message[]>([greeting]);
   const [input, setInput] = useState('');
   const scroll = useRef<ScrollView>(null);
@@ -32,6 +38,11 @@ export function HelpScreen() {
       en: 'When is my next claim?',
       bs: 'Kanus-a akong sunod nga claim?',
       kind: 'schedule',
+    },
+    {
+      en: 'What is my claim status?',
+      bs: 'Unsa ang kahimtang sa akong claim?',
+      kind: 'status',
     },
     { en: 'What should I bring?', bs: 'Unsay akong dad-on?', kind: 'bring' },
     { en: 'My face scan failed!', bs: 'Napakyas akong face scan!', kind: 'scan' },
@@ -67,16 +78,65 @@ export function HelpScreen() {
                   query.includes('iskedyul')
                 ? 'schedule'
                 : 'unknown');
+    const statusAnswer = (() => {
+      if (walletError) {
+        return {
+          en: 'Your saved claim status is temporarily unavailable. Open Wallet and try loading it again.',
+          bs: 'Temporaryong dili makita ang natipig nga kahimtang sa claim. Ablihi ang Wallet ug sulayi pag-load pag-usab.',
+        };
+      }
+      if (walletLoading && !wallet) {
+        return {
+          en: 'Your saved claim status is still loading. Please ask again in a moment.',
+          bs: 'Nag-load pa ang natipig nga kahimtang sa claim. Pangutana pag-usab sa makadiyot.',
+        };
+      }
+      const current = wallet?.currentClaim;
+      if (current?.status === 'not_claimed') {
+        return {
+          en: `Your ${current.program.name} claim scheduled for ${formatDate(current.date)} has not been claimed yet. Authorized staff will record the result after checking your QR pass.`,
+          bs: `Wala pa ma-claim ang ${current.program.name} nga naka-iskedyul sa ${formatDate(current.date)}. Ang awtorisadong staff maoy morekord sa resulta human susihon ang QR pass.`,
+        };
+      }
+      if (current) {
+        const recordedEn = current.claimedAt
+          ? ` It was recorded ${formatDateTime(current.claimedAt)}.`
+          : '';
+        const recordedBs = current.claimedAt
+          ? ` Girekord kini niadtong ${formatDateTime(current.claimedAt)}.`
+          : '';
+        return {
+          en: `Your current ${current.program.name} claim status is ${formatStatus(current.status)}.${recordedEn}`,
+          bs: `Ang kahimtang sa imong kasamtangang ${current.program.name} claim kay ${formatStatus(current.status)}.${recordedBs}`,
+        };
+      }
+      const latest = wallet?.claims[0];
+      if (latest) {
+        const transaction = wallet?.transactions.find((item) => item.claimId === latest.id);
+        const receiptEn = transaction
+          ? ` Receipt ${transaction.reference} records ${peso(transaction.amount)}.`
+          : '';
+        const receiptBs = transaction
+          ? ` Ang resibo ${transaction.reference} nagrekord og ${peso(transaction.amount)}.`
+          : '';
+        const recordedEn = latest.claimedAt
+          ? ` It was recorded ${formatDateTime(latest.claimedAt)}.`
+          : '';
+        const recordedBs = latest.claimedAt
+          ? ` Girekord kini niadtong ${formatDateTime(latest.claimedAt)}.`
+          : '';
+        return {
+          en: `Your latest ${latest.program.name} claim status is ${formatStatus(latest.status)}.${recordedEn}${receiptEn}`,
+          bs: `Ang pinakabag-o nimong ${latest.program.name} claim kay ${formatStatus(latest.status)}.${recordedBs}${receiptBs}`,
+        };
+      }
+      return {
+        en: 'No claim is recorded for your account yet.',
+        bs: 'Wala pay claim nga narekord sa imong account.',
+      };
+    })();
     const answers: Record<string, { en: string; bs: string }> = {
-      status: claimCompleted
-        ? {
-            en: 'Your simulated claim is complete. A sample ₱1,500 credit was added to your demo wallet during this session. No real funds were transferred.',
-            bs: 'Nahuman na ang imong simulated claim. Gidugang ang sample nga ₱1,500 sa demo wallet niining session. Walay tinuod nga kwarta nga gibalhin.',
-          }
-        : {
-            en: 'No completed claim is recorded in this preview session. You can view your sample schedule and QR pass from Home. This is sample information, not an official claim status.',
-            bs: 'Wala pay nahuman nga claim niining preview session. Makita sa Home ang sample nga iskedyul ug QR pass. Sample nga impormasyon kini, dili opisyal nga kahimtang sa claim.',
-          },
+      status: statusAnswer,
       schedule: overview?.nextSchedule
         ? {
             en: `Your next claiming schedule is ${formatDate(overview.nextSchedule.date)} from ${formatTimeSlot(overview.nextSchedule.slotStart, overview.nextSchedule.slotEnd)} at ${overview.nextSchedule.location}. Your queue number is ${formatQueueNumber(overview.nextSchedule.queueNumber)}.`,
@@ -99,8 +159,8 @@ export function HelpScreen() {
         bs: 'Ablihi ang Profile → Ienroll ang nawong. Basaha ang pagtugot ug pilia kon mopadayon. Opsyonal ang enrollment; pwede gamiton ang numero.',
       },
       unknown: {
-        en: 'This preview can answer the sample questions about schedules, claim status, documents, and face enrollment. For other concerns, use Talk to staff. No live AI or support service is connected.',
-        bs: 'Kini nga preview makatubag sa sample nga pangutana bahin sa iskedyul, kahimtang sa claim, dokumento, ug nawong. Alang sa uban, gamita ang Pakigsulti sa staff. Wala pay live AI o support service.',
+        en: 'This assistant can read your saved schedule and claim status. Other answers remain previews. For other concerns, use Talk to staff. No live AI or support service is connected.',
+        bs: 'Mabasa sa assistant ang natipig nga iskedyul ug kahimtang sa claim. Preview pa ang ubang tubag. Alang sa uban, gamita ang Pakigsulti sa staff. Wala pay live AI o support service.',
       },
     };
     const answer = answers[detected];
@@ -148,8 +208,8 @@ export function HelpScreen() {
         >
           <Notice>
             {t(
-              'Prototype assistant · Schedule answers use your saved account; other answers remain previews.',
-              'Prototype assistant · Ang iskedyul gikan sa imong account; preview pa ang ubang tubag.',
+              'Prototype assistant · Schedule and claim-status answers use your saved account; other answers remain previews.',
+              'Prototype assistant · Ang iskedyul ug kahimtang sa claim gikan sa imong account; preview pa ang ubang tubag.',
             )}
           </Notice>
           {messages.map((message) => (

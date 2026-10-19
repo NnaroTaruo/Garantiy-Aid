@@ -32,9 +32,15 @@ import {
   styles,
   Txt,
 } from '../components';
-import { appointment as a, peso, transactions, useDemo } from '../state';
-import { ApiRequestError, logout } from '../api';
-import { formatDate, formatQueueNumber, formatStatus, formatTimeSlot } from '../format';
+import { notices, peso, useDemo } from '../state';
+import { ApiRequestError, logout, type WalletTransaction } from '../api';
+import {
+  formatDate,
+  formatDateTime,
+  formatQueueNumber,
+  formatStatus,
+  formatTimeSlot,
+} from '../format';
 import { colors as c, fonts } from '../theme';
 
 export function HomeScreen() {
@@ -66,7 +72,7 @@ export function HomeScreen() {
           style={styles.iconButton}
         >
           <Bell size={22} color={c.muted} />
-          {readNotifications.length < 4 && <View style={s.unreadDot} />}
+          {readNotifications.length < notices.length && <View style={s.unreadDot} />}
         </Pressable>
         <View style={{ marginLeft: 'auto' }}>
           <LanguageToggle />
@@ -205,8 +211,8 @@ export function HomeScreen() {
       </View>
       <Notice>
         {t(
-          'Enrollment and schedule data come from your saved account. QR passes, claims, and wallet entries remain previews.',
-          'Ang enrollment ug iskedyul gikan sa imong account. Preview pa ang QR pass, claims, ug wallet.',
+          'Enrollment, schedule, QR passes, claim status, and wallet history come from your saved account.',
+          'Ang enrollment, iskedyul, QR pass, kahimtang sa claim, ug wallet history gikan sa imong account.',
         )}
       </Notice>
     </Page>
@@ -214,83 +220,139 @@ export function HomeScreen() {
 }
 
 export function WalletScreen() {
-  const { claimCompleted, t } = useDemo();
-  const [selected, setSelected] = useState<(typeof transactions)[number] | null>(null);
-  const entries = claimCompleted
-    ? [
-        {
-          id: 'demo-claim',
-          title: 'Aid received',
-          date: 'July 10, 2025',
-          reference: 'DEMO-CLAIM-047',
-          amount: 1500,
-          status: 'received',
-        },
-        ...transactions,
-      ]
-    : transactions;
+  const { wallet, walletLoading, walletError, refreshWallet, t } = useDemo();
+  const [selected, setSelected] = useState<WalletTransaction | null>(null);
+  const entries = wallet?.transactions ?? [];
+  const currentClaim = wallet?.currentClaim;
   return (
     <Page tabs title={t('My Wallet', 'Akong Wallet')} back={false}>
-      <Notice tone="warning">
+      <Notice>
         {t(
-          'Simulated wallet — no real money is transferred.',
-          'Simulated wallet — walay tinuod nga kuwarta ibalhin.',
+          'This wallet records assistance issued to you. It cannot send or transfer money.',
+          'Kini nga wallet nagrekord sa ayuda nga imong nadawat. Dili kini makapadala o makabalhin og kuwarta.',
         )}
       </Notice>
-      <View style={s.balanceCard}>
-        <Txt variant="small" style={s.cardCaption}>
-          {t('WALLET BALANCE', 'BALANSE SA WALLET')}
-        </Txt>
-        <Txt variant="number" style={{ color: c.card, fontSize: 34 }}>
-          {peso(claimCompleted ? 4500 : 3000)}
-        </Txt>
-      </View>
-      <Notice tone="warning">
-        {t(
-          'This is a simulated wallet. It records aid disbursements but does not hold or transfer real money.',
-          'Simulated wallet kini. Nagrekord kini sa ayuda apan dili magkupot o magbalhin og tinuod nga kuwarta.',
-        )}
-      </Notice>
-      <View style={[styles.row, { justifyContent: 'space-between' }]}>
-        <Txt variant="label">{t('Recent transactions', 'Bag-ong mga transaksyon')}</Txt>
-        <Pressable
-          accessibilityRole="button"
-          style={styles.iconButton}
-          accessibilityLabel={t('View transaction history', 'Tan-awa ang kasaysayan')}
-          onPress={() => go('transactions')}
-        >
-          <History size={20} color={c.primary} />
-        </Pressable>
-      </View>
-      <Card style={{ gap: 0, paddingVertical: 4 }}>
-        {entries.map((entry, index) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`${t('Open receipt', 'Ablihi ang resibo')}: ${entry.date}`}
-            key={entry.id}
-            style={[
-              s.transaction,
-              index > 0 && { borderTopWidth: 1, borderTopColor: c.outline },
-            ]}
-            onPress={() => setSelected(entry)}
-          >
-            <View style={{ flex: 1, gap: 4 }}>
-              <Txt variant="label">{t(entry.title, 'Nadawat nga ayuda')}</Txt>
-              <Txt variant="small">4Ps · {entry.date}</Txt>
-              <Txt variant="small" style={{ fontSize: 10 }}>
-                {entry.reference}
-              </Txt>
-            </View>
-            <Txt variant="label" style={{ color: c.green, fontSize: 13 }}>
-              +{peso(entry.amount)}
+      {walletLoading && !wallet ? (
+        <Card>
+          <Txt variant="label">{t('Loading wallet records…', 'Nag-load sa wallet records…')}</Txt>
+        </Card>
+      ) : walletError ? (
+        <>
+          <Notice tone="error">
+            {t(
+              'Your claim and wallet records could not be loaded.',
+              'Wala ma-load ang imong claim ug wallet records.',
+            )}
+          </Notice>
+          <Button variant="outline" onPress={() => void refreshWallet()}>
+            {t('Try again', 'Sulayi pag-usab')}
+          </Button>
+        </>
+      ) : (
+        <>
+          <View style={s.balanceCard}>
+            <Txt variant="small" style={s.cardCaption}>
+              {t('RECORDED BALANCE', 'NAREKORD NGA BALANSE')}
             </Txt>
-            <ChevronRight size={16} color={c.muted} />
-          </Pressable>
-        ))}
-      </Card>
-      <Button variant="outline" icon={FileText} onPress={() => go('transactions')}>
-        {t('View transaction history', 'Tan-awa ang kasaysayan')}
-      </Button>
+            <Txt variant="number" style={{ color: c.card, fontSize: 34 }}>
+              {peso(wallet?.wallet?.balance ?? 0)}
+            </Txt>
+          </View>
+          {currentClaim ? (
+            <Card>
+              <View style={[styles.row, { justifyContent: 'space-between' }]}>
+                <Txt variant="label">{t('Current claim', 'Kasamtangang claim')}</Txt>
+                <Badge>{formatStatus(currentClaim.status)}</Badge>
+              </View>
+              <DetailRow label={t('Program', 'Programa')} value={currentClaim.program.name} />
+              <DetailRow label={t('Schedule', 'Iskedyul')} value={formatDate(currentClaim.date)} />
+              <DetailRow label={t('Amount', 'Kantidad')} value={peso(currentClaim.amount)} />
+              {currentClaim.status === 'not_claimed' && (
+                <Txt variant="small">
+                  {t(
+                    'Authorized staff will record the result after checking your claim pass.',
+                    'Ang awtorisadong staff maoy morekord sa resulta human susihon ang imong claim pass.',
+                  )}
+                </Txt>
+              )}
+            </Card>
+          ) : (
+            <Notice>
+              {t(
+                'No upcoming claim is assigned to your account.',
+                'Walay umaabot nga claim nga gi-assign sa imong account.',
+              )}
+            </Notice>
+          )}
+        </>
+      )}
+      {!walletError && (
+        <Button
+          variant="outline"
+          loading={walletLoading}
+          onPress={() => void refreshWallet()}
+        >
+          {t('Refresh records', 'I-refresh ang records')}
+        </Button>
+      )}
+      {!walletError && (!walletLoading || !!wallet) && (
+        <>
+          <View style={[styles.row, { justifyContent: 'space-between' }]}>
+            <Txt variant="label">{t('Recent transactions', 'Bag-ong mga transaksyon')}</Txt>
+            <Pressable
+              accessibilityRole="button"
+              style={styles.iconButton}
+              accessibilityLabel={t('View transaction history', 'Tan-awa ang kasaysayan')}
+              onPress={() => go('transactions')}
+            >
+              <History size={20} color={c.primary} />
+            </Pressable>
+          </View>
+          {entries.length ? (
+            <Card style={{ gap: 0, paddingVertical: 4 }}>
+              {entries.map((entry, index) => (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`${t('Open receipt', 'Ablihi ang resibo')}: ${formatDateTime(entry.createdAt)}`}
+                  key={entry.id}
+                  style={[
+                    s.transaction,
+                    index > 0 && { borderTopWidth: 1, borderTopColor: c.outline },
+                  ]}
+                  onPress={() => setSelected(entry)}
+                >
+                  <View style={{ flex: 1, gap: 4 }}>
+                    <Txt variant="label">{t('Aid received', 'Nadawat nga ayuda')}</Txt>
+                    <Txt variant="small">
+                      {entry.program.name} · {formatDateTime(entry.createdAt)}
+                    </Txt>
+                    <Txt variant="small" style={{ fontSize: 10 }}>
+                      {entry.reference}
+                    </Txt>
+                  </View>
+                  <Txt variant="label" style={{ color: c.green, fontSize: 13 }}>
+                    +{peso(entry.amount)}
+                  </Txt>
+                  <ChevronRight size={16} color={c.muted} />
+                </Pressable>
+              ))}
+            </Card>
+          ) : (
+            <Card>
+              <Txt variant="label">{t('No wallet history yet', 'Wala pay wallet history')}</Txt>
+              <Txt variant="small">
+                {t(
+                  'Recorded assistance will appear here after an authorized staff member completes a claim.',
+                  'Makita dinhi ang narekord nga ayuda human makompleto sa awtorisadong staff ang claim.',
+                )}
+              </Txt>
+            </Card>
+          )}
+          <Button variant="outline" icon={FileText} onPress={() => go('transactions')}>
+            {t('View transaction history', 'Tan-awa ang kasaysayan')}
+          </Button>
+        </>
+      )}
       <Modal
         visible={!!selected}
         transparent
@@ -320,11 +382,18 @@ export function WalletScreen() {
               </View>
             </View>
             {[
-              { label: t('Program', 'Programa'), value: a.program },
-              { label: t('Date', 'Petsa'), value: selected?.date },
+              { label: t('Program', 'Programa'), value: selected?.program.name },
+              {
+                label: t('Recorded', 'Girekord'),
+                value: selected ? formatDateTime(selected.createdAt) : '',
+              },
               {
                 label: t('Reference No.', 'Numero sa reperensya'),
                 value: selected?.reference,
+              },
+              {
+                label: t('Status', 'Kahimtang'),
+                value: selected ? formatStatus(selected.status) : '',
               },
             ].map(({ label, value }) => (
               <View
@@ -343,10 +412,10 @@ export function WalletScreen() {
                 </Txt>
               </View>
             ))}
-            <Notice tone="warning">
+            <Notice>
               {t(
-                'Simulated receipt. No funds were transferred.',
-                'Simulated nga resibo. Walay kuwarta gibalhin.',
+                'This receipt is a recorded assistance entry. This app does not transfer funds.',
+                'Kini nga resibo usa ka rekord sa ayuda. Kini nga app dili magbalhin og kuwarta.',
               )}
             </Notice>
             <Button onPress={() => setSelected(null)}>{t('Close', 'Sirad-i')}</Button>

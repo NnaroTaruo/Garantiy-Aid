@@ -13,6 +13,7 @@ These are the mobile frontend's requirements, derived from the manuscript and la
 | `POST /auth/logout` | Revokes the current bearer session. |
 | `GET /beneficiaries/me` | Returns the authenticated beneficiary profile. |
 | `GET /beneficiaries/me/overview` | Returns program enrollments and the next assigned distribution schedule. |
+| `GET /beneficiaries/me/wallet` | Returns the beneficiary's wallet summary, current claim status, claim history, and posted assistance receipts. |
 | `POST /beneficiaries/me/claim-pass` | Issues a hashed, expiring QR pass for the authenticated beneficiary's next distribution. |
 
 | Capability                      | Required behavior and fields                                                                                                                                                                                                                    |
@@ -22,12 +23,12 @@ These are the mobile frontend's requirements, derived from the manuscript and la
 | Program enrollment              | **Implemented for program, enrollment date, grant amount, and status.** Required documents, validation results, and assigned staff contact remain.                                                                                              |
 | Schedules                       | **Implemented for the next assigned schedule:** distribution and schedule IDs, program, date, start/end, queue number, location, and status. Change notifications remain.                                                                       |
 | QR claim pass                   | **Mobile issuance implemented:** server-issued opaque token, distribution scope, expiry, and replacement revocation. Staff-side validation and used status remain.                                                                            |
-| Claims                          | Authoritative validation, authorized staff action, claim status, amount, program, date, receipt reference, and duplicate blocking across devices. The mobile client displays the result.                                                        |
+| Claims                          | **Read-only mobile status implemented:** saved claim status, verification method, program, amount, distribution date, and claimed timestamp. Authorized staff validation, duplicate blocking, and atomic claim completion remain.                 |
 | Consent and biometrics          | Versioned privacy notice and consent, consent ID and timestamps, withdrawal, secure photo upload if allowed, face enrollment result, and server-side matching/liveness. The client captures a photo; it does not declare a real identity match. |
-| Wallet and transactions         | Simulated balance, currency, transaction amount/type/date/status/reference, and receipts. No real financial processing is in capstone scope.                                                                                                    |
+| Wallet and transactions         | **Database-backed read-only ledger implemented:** account balance/currency/status, transaction amount/type/date/status/reference, linked claim status, and receipt details. It records assistance and never holds or transfers funds.             |
 | Notifications                   | Notification ID/type/message/date/read status, SMS/push preferences, and device registration for push. No SMS provider secret belongs in the app.                                                                                               |
 | Assistant and escalation        | Session/language, authorized answers about the beneficiary, service errors, assigned staff contact, and explicit submitted-ticket confirmation.                                                                                                 |
 
-The mobile app centralizes API calls with a timeout, loading/error states, server-issued codes, persistent sessions, and protected signed-in routes. Do not embed database, SMS, or biometric-service credentials in Expo public environment variables.
+The mobile app centralizes API calls with a timeout, loading/error states, server-issued codes, persistent sessions, and protected signed-in routes. Claim and wallet data are display-only in the beneficiary app. The future staff endpoint must verify the claim and create the associated transaction in one database transaction so partial completion cannot occur. Do not embed database, SMS, or biometric-service credentials in Expo public environment variables.
 
 Add offline schedule/pass caching only after agreeing token expiry and revocation behavior. The current pass is held only while its screen is open and is reissued by the server when opened again.

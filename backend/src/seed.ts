@@ -111,5 +111,110 @@ await prisma.schedule.upsert({
   },
 });
 
+const pastDistributionDate = new Date("2026-08-28T00:00:00.000Z");
+const pastDistribution = await prisma.distribution.upsert({
+  where: {
+    programId_distributionDate_location: {
+      programId: program.programId,
+      distributionDate: pastDistributionDate,
+      location: "Barangay Punta Princesa Hall",
+    },
+  },
+  update: { title: "August 2026 4Ps Distribution", status: "completed" },
+  create: {
+    programId: program.programId,
+    title: "August 2026 4Ps Distribution",
+    distributionDate: pastDistributionDate,
+    location: "Barangay Punta Princesa Hall",
+    status: "completed",
+  },
+});
+
+const pastSchedule = await prisma.schedule.upsert({
+  where: {
+    distributionId_beneficiaryId: {
+      distributionId: pastDistribution.distributionId,
+      beneficiaryId: beneficiary.beneficiaryId,
+    },
+  },
+  update: {
+    slotStart: new Date("2026-08-28T01:00:00.000Z"),
+    slotEnd: new Date("2026-08-28T02:00:00.000Z"),
+    queueNumber: 32,
+    status: "claimed",
+  },
+  create: {
+    distributionId: pastDistribution.distributionId,
+    beneficiaryId: beneficiary.beneficiaryId,
+    slotStart: new Date("2026-08-28T01:00:00.000Z"),
+    slotEnd: new Date("2026-08-28T02:00:00.000Z"),
+    queueNumber: 32,
+    status: "claimed",
+  },
+});
+
+const claimedAt = new Date("2026-08-28T01:42:00.000Z");
+const claim = await prisma.claim.upsert({
+  where: {
+    beneficiaryId_distributionId: {
+      beneficiaryId: beneficiary.beneficiaryId,
+      distributionId: pastDistribution.distributionId,
+    },
+  },
+  update: {
+    scheduleId: pastSchedule.scheduleId,
+    claimStatus: "completed",
+    verificationMethod: "qr",
+    qrVerified: true,
+    isDuplicateFlag: false,
+    claimedAt,
+  },
+  create: {
+    beneficiaryId: beneficiary.beneficiaryId,
+    distributionId: pastDistribution.distributionId,
+    scheduleId: pastSchedule.scheduleId,
+    claimStatus: "completed",
+    verificationMethod: "qr",
+    qrVerified: true,
+    claimedAt,
+    createdAt: claimedAt,
+  },
+});
+
+const wallet = await prisma.walletAccount.upsert({
+  where: { beneficiaryId: beneficiary.beneficiaryId },
+  update: { balance: "1500.00", currency: "PHP", accountStatus: "active", lastTransactionAt: claimedAt },
+  create: {
+    beneficiaryId: beneficiary.beneficiaryId,
+    balance: "1500.00",
+    currency: "PHP",
+    accountStatus: "active",
+    lastTransactionAt: claimedAt,
+  },
+});
+
+await prisma.transaction.upsert({
+  where: { referenceNo: "GAI-2026-0828-032" },
+  update: {
+    claimId: claim.claimId,
+    walletId: wallet.walletId,
+    beneficiaryId: beneficiary.beneficiaryId,
+    amount: "1500.00",
+    transactionType: "assistance_credit",
+    status: "posted",
+    createdAt: claimedAt,
+  },
+  create: {
+    claimId: claim.claimId,
+    walletId: wallet.walletId,
+    beneficiaryId: beneficiary.beneficiaryId,
+    amount: "1500.00",
+    transactionType: "assistance_credit",
+    referenceNo: "GAI-2026-0828-032",
+    status: "posted",
+    createdAt: claimedAt,
+  },
+});
+
 await prisma.$disconnect();
-console.info("Seeded the starter barangay and mobile demo beneficiary overview.");
+console.info("Seeded the mobile beneficiary, schedule, completed claim, and wallet history.");

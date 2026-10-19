@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Switch, View } from 'react-native';
+import { Pressable, Switch, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import QRCode from 'react-native-qrcode-svg';
@@ -35,7 +35,7 @@ import {
   styles,
   Txt,
 } from '../components';
-import { appointment as a, notices, peso, transactions, useDemo } from '../state';
+import { appointment as a, notices, peso, useDemo } from '../state';
 import { colors as c, fonts } from '../theme';
 import { ApiRequestError, getBarangays, issueClaimPass, type ClaimPass as ClaimPassData } from '../api';
 import {
@@ -117,10 +117,6 @@ export function DetailScreen() {
       title: t('QR verification', 'QR verification'),
       content: <Exception kind="expired" />,
     },
-    'claim-review': {
-      title: t('Claim verification', 'Pagverify sa claim'),
-      content: <Exception kind="review" />,
-    },
     support: {
       title: t('Talk to staff', 'Pakigsulti sa staff'),
       content: <Support />,
@@ -130,12 +126,7 @@ export function DetailScreen() {
       title: t('Login with Face', 'Log in pinaagi sa Nawong'),
       content: <FaceLogin />,
     },
-    'verify-identity': {
-      title: t('Verify identity', 'Iverify ang pagkatawo'),
-      content: <VerifyClaim />,
-    },
   };
-  if (screen === 'claim-success') return <ClaimSuccess />;
   const entry = definitions[screen];
   if (!entry)
     return (
@@ -312,8 +303,8 @@ function ClaimPass() {
       </Card>
       <Notice>
         {t(
-          `Show this pass only to authorized staff. It expires ${formatDateTime(pass.expiresAt)}.`,
-          `Ipakita lamang kini sa awtorisadong staff. Ma-expire kini ${formatDateTime(pass.expiresAt)}.`,
+          `Show this pass only to authorized staff. It expires ${formatDateTime(pass.expiresAt)}. Staff record the result, then it appears in Wallet.`,
+          `Ipakita lamang kini sa awtorisadong staff. Ma-expire kini ${formatDateTime(pass.expiresAt)}. Ang staff maoy morekord sa resulta, dayon makita kini sa Wallet.`,
         )}
       </Notice>
       <Button variant="outline" onPress={() => go('schedule')}>
@@ -324,78 +315,108 @@ function ClaimPass() {
 }
 
 function Transactions() {
-  const { claimCompleted, t } = useDemo();
-  const [selected, setSelected] = useState('june');
-  const entries = claimCompleted
-    ? [
-        {
-          id: 'demo-claim',
-          title: 'Aid received',
-          date: 'July 10, 2025',
-          reference: 'DEMO-CLAIM-047',
-          amount: 1500,
-          status: 'received',
-        },
-        ...transactions,
-      ]
-    : transactions;
+  const { wallet, walletLoading, walletError, refreshWallet, t } = useDemo();
+  const [selected, setSelected] = useState('');
+  const entries = wallet?.transactions ?? [];
+  const selectedId = entries.some((entry) => entry.id === selected)
+    ? selected
+    : (entries[0]?.id ?? '');
   return (
     <>
       <Notice>
         {t(
-          'SIMULATED WALLET · No real money is transferred.',
-          'SIMULATED WALLET · Walay tinuod nga kuwarta ibalhin.',
+          'This wallet records assistance issued to you. It cannot send or transfer money.',
+          'Kini nga wallet nagrekord sa ayuda nga imong nadawat. Dili kini makapadala o makabalhin og kuwarta.',
         )}
       </Notice>
-      <View style={mainStyles.balanceCard}>
-        <Txt variant="small" style={mainStyles.cardCaption}>
-          {t('AVAILABLE BALANCE', 'MAGAMIT NGA BALANSE')}
-        </Txt>
-        <Txt variant="heading" style={{ fontSize: 26, color: c.card }}>
-          {peso(claimCompleted ? 4500 : 3000)}
-        </Txt>
-      </View>
-      <Txt variant="small" style={{ fontFamily: fonts.semibold }}>
-        {t('RECENT TRANSACTIONS', 'BAG-ONG MGA TRANSAKSYON')}
-      </Txt>
-      <Card style={{ gap: 0, paddingVertical: 4 }}>
-        {entries.map((entry, index) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ selected: selected === entry.id }}
-            onPress={() => setSelected(entry.id)}
-            key={entry.id}
-            style={[
-              mainStyles.transaction,
-              index > 0 && { borderTopWidth: 1, borderTopColor: c.outline },
-            ]}
-          >
-            <View style={{ flex: 1, gap: 4 }}>
-              <Txt variant="label">{t('Aid received', 'Nadawat nga ayuda')}</Txt>
-              <Txt variant="small">4Ps · {entry.date}</Txt>
-              <Txt variant="small" style={{ fontSize: 10 }}>
-                {entry.reference}
-              </Txt>
-            </View>
-            <Txt variant="small" style={{ color: c.green, fontFamily: fonts.semibold }}>
-              +{peso(entry.amount)}
+      {walletLoading && !wallet ? (
+        <Card>
+          <Txt variant="label">{t('Loading wallet records…', 'Nag-load sa wallet records…')}</Txt>
+        </Card>
+      ) : walletError ? (
+        <>
+          <Notice tone="error">
+            {t(
+              'Your wallet history could not be loaded.',
+              'Wala ma-load ang imong wallet history.',
+            )}
+          </Notice>
+          <Button variant="outline" onPress={() => void refreshWallet()}>
+            {t('Try again', 'Sulayi pag-usab')}
+          </Button>
+        </>
+      ) : (
+        <>
+          <View style={mainStyles.balanceCard}>
+            <Txt variant="small" style={mainStyles.cardCaption}>
+              {t('RECORDED BALANCE', 'NAREKORD NGA BALANSE')}
             </Txt>
-            {selected === entry.id && <Check size={18} color={c.primary} />}
-          </Pressable>
-        ))}
-        {!claimCompleted && (
-          <View style={mainStyles.transaction}>
-            <View style={{ flex: 1 }}>
-              <Txt variant="label">{t('Scheduled credit', 'Gikatakdang credit')}</Txt>
-              <Txt variant="small">4Ps · July 10, 2025</Txt>
-            </View>
-            <Txt variant="small" style={{ color: c.amber }}>
-              {peso(1500)}
+            <Txt variant="heading" style={{ fontSize: 26, color: c.card }}>
+              {peso(wallet?.wallet?.balance ?? 0)}
             </Txt>
           </View>
-        )}
-      </Card>
-      <Button variant="outline" onPress={() => go('receipt', { id: selected })}>
+          <Txt variant="small" style={{ fontFamily: fonts.semibold }}>
+            {t('RECENT TRANSACTIONS', 'BAG-ONG MGA TRANSAKSYON')}
+          </Txt>
+          {entries.length ? (
+            <Card style={{ gap: 0, paddingVertical: 4 }}>
+              {entries.map((entry, index) => (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: selectedId === entry.id }}
+                  onPress={() => setSelected(entry.id)}
+                  key={entry.id}
+                  style={[
+                    mainStyles.transaction,
+                    index > 0 && { borderTopWidth: 1, borderTopColor: c.outline },
+                  ]}
+                >
+                  <View style={{ flex: 1, gap: 4 }}>
+                    <Txt variant="label">{t('Aid received', 'Nadawat nga ayuda')}</Txt>
+                    <Txt variant="small">
+                      {entry.program.name} · {formatDateTime(entry.createdAt)}
+                    </Txt>
+                    <Txt variant="small" style={{ fontSize: 10 }}>
+                      {entry.reference}
+                    </Txt>
+                  </View>
+                  <Txt
+                    variant="small"
+                    style={{ color: c.green, fontFamily: fonts.semibold }}
+                  >
+                    +{peso(entry.amount)}
+                  </Txt>
+                  {selectedId === entry.id && <Check size={18} color={c.primary} />}
+                </Pressable>
+              ))}
+            </Card>
+          ) : (
+            <Card>
+              <Txt variant="label">{t('No wallet history yet', 'Wala pay wallet history')}</Txt>
+              <Txt variant="small">
+                {t(
+                  'Recorded assistance will appear here after an authorized staff member completes a claim.',
+                  'Makita dinhi ang narekord nga ayuda human makompleto sa awtorisadong staff ang claim.',
+                )}
+              </Txt>
+            </Card>
+          )}
+        </>
+      )}
+      {!walletError && (
+        <Button
+          variant="outline"
+          loading={walletLoading}
+          onPress={() => void refreshWallet()}
+        >
+          {t('Refresh records', 'I-refresh ang records')}
+        </Button>
+      )}
+      <Button
+        variant="outline"
+        disabled={!selectedId}
+        onPress={() => go('receipt', { id: selectedId })}
+      >
         {t('View selected receipt', 'Tan-awa ang napiling resibo')}
       </Button>
     </>
@@ -403,11 +424,25 @@ function Transactions() {
 }
 function Receipt() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { claimCompleted, t } = useDemo();
-  const entry =
-    id === 'demo-claim' && claimCompleted
-      ? { date: 'July 10, 2025', reference: 'DEMO-CLAIM-047', amount: 1500 }
-      : transactions.find((item) => item.id === id);
+  const { wallet, walletLoading, walletError, refreshWallet, t } = useDemo();
+  const entry = wallet?.transactions.find((item) => item.id === id);
+  if (walletLoading && !wallet)
+    return (
+      <Card>
+        <Txt variant="label">{t('Loading receipt…', 'Nag-load sa resibo…')}</Txt>
+      </Card>
+    );
+  if (walletError)
+    return (
+      <>
+        <Notice tone="error">
+          {t('This receipt could not be loaded.', 'Wala ma-load kini nga resibo.')}
+        </Notice>
+        <Button variant="outline" onPress={() => void refreshWallet()}>
+          {t('Try again', 'Sulayi pag-usab')}
+        </Button>
+      </>
+    );
   if (!entry)
     return (
       <Notice tone="warning">
@@ -429,17 +464,22 @@ function Receipt() {
         </View>
       </View>
       <Card>
-        <DetailRow label={t('Program', 'Programa')} value={a.program} />
-        <DetailRow label={t('Date', 'Petsa')} value={entry.date} />
+        <DetailRow label={t('Program', 'Programa')} value={entry.program.name} />
+        <DetailRow label={t('Recorded', 'Girekord')} value={formatDateTime(entry.createdAt)} />
         <DetailRow
           label={t('Reference No.', 'Numero sa reperensya')}
           value={entry.reference}
         />
+        <DetailRow label={t('Status', 'Kahimtang')} value={formatStatus(entry.status)} />
+        <DetailRow
+          label={t('Claim status', 'Kahimtang sa claim')}
+          value={formatStatus(entry.claimStatus)}
+        />
       </Card>
-      <Notice tone="warning">
+      <Notice>
         {t(
-          'This is a simulated receipt, with no actual disbursement.',
-          'Simulated nga resibo kini. Walay tinuod nga disbursement.',
+          'This receipt is a recorded assistance entry. This app does not transfer funds.',
+          'Kini nga resibo usa ka rekord sa ayuda. Kini nga app dili magbalhin og kuwarta.',
         )}
       </Notice>
       <Button onPress={() => router.back()}>{t('Close', 'Sirad-i')}</Button>
@@ -973,7 +1013,7 @@ function Privacy() {
   );
 }
 
-function Exception({ kind }: { kind: 'schedule' | 'expired' | 'review' }) {
+function Exception({ kind }: { kind: 'schedule' | 'expired' }) {
   const { t } = useDemo();
   const definitions = {
     schedule: {
@@ -993,15 +1033,6 @@ function Exception({ kind }: { kind: 'schedule' | 'expired' | 'review' }) {
         'Paghangyo og bag-ong pass o tabang sa staff. Preview kini sa expired nga pass.',
       ),
       tone: 'error' as const,
-    },
-    review: {
-      badge: t('NEEDS REVIEW', 'KINAHANGLAN SUSIHON'),
-      title: t('Your claim needs staff review', 'Kinahanglan susihon sa staff ang claim'),
-      body: t(
-        'A verification issue or repeat attempt needs review. No assistance has been released by this preview.',
-        'Kinahanglan susihon ang problema sa pagverify o balik nga claim. Walay ayuda gipagawas sa preview.',
-      ),
-      tone: 'warning' as const,
     },
   };
   const item = definitions[kind];
@@ -1079,134 +1110,3 @@ function FaceLogin() {
     </>
   );
 }
-function VerifyClaim() {
-  const { claimCompleted, setClaimCompleted, t } = useDemo();
-  return (
-    <>
-      <View style={{ alignItems: 'center', gap: 16, paddingVertical: 12 }}>
-        <ScanFace size={80} color={c.primary} />
-        <Txt variant="title" style={{ textAlign: 'center' }}>
-          {t('Verify your identity', 'Iverify imong pagkatawo')}
-        </Txt>
-        <Txt style={{ textAlign: 'center', color: c.muted }}>
-          {t(
-            'Staff confirm your identity at the distribution center before assistance is recorded.',
-            'Iverify sa staff imong pagkatawo sa distribution center sa dili pa irekord ang ayuda.',
-          )}
-        </Txt>
-      </View>
-      <Card>
-        <DetailRow label={t('Program', 'Programa')} value={a.program} />
-        <DetailRow label={t('Queue number', 'Numero sa pila')} value={a.queue} />
-      </Card>
-      <Notice>
-        {t(
-          'This button demonstrates the successful screen only. No real biometric verification or claim approval occurs.',
-          'Kini nga button nagpakita lamang sa success screen. Walay tinuod nga biometric verification o pag-apruba.',
-        )}
-      </Notice>
-      <Button
-        variant="green"
-        onPress={() => {
-          if (claimCompleted) {
-            go('claim-review');
-            return;
-          }
-          setClaimCompleted(true);
-          router.replace('/claim-success');
-        }}
-      >
-        {t('Preview successful claim', 'Tan-awa ang malampusong claim')}
-      </Button>
-      <Button variant="outline" onPress={() => go('claim-review')}>
-        {t('Preview verification issue', 'Tan-awa ang problema sa pagverify')}
-      </Button>
-    </>
-  );
-}
-function ClaimSuccess() {
-  const { claimCompleted, t } = useDemo();
-  if (!claimCompleted)
-    return (
-      <Page title={t('Claim confirmation', 'Kumpirmasyon sa claim')}>
-        <Notice>
-          {t(
-            'Complete the preview claim flow to see this confirmation.',
-            'Kompletoha ang preview claim aron makita ang kumpirmasyon.',
-          )}
-        </Notice>
-        <Button onPress={() => router.replace('/qr-pass')}>
-          {t('Open QR pass', 'Ablihi ang QR pass')}
-        </Button>
-      </Page>
-    );
-  return (
-    <Page header={false} contentStyle={{ padding: 0 }}>
-      <View style={s.claimSuccess}>
-        <Logo size={28} />
-        <View style={s.bigCheck}>
-          <Check size={66} color={c.card} />
-        </View>
-        <Txt variant="title" style={{ color: c.card, textAlign: 'center' }}>
-          {t('Claim successful!', 'Malampuson ang claim!')}
-        </Txt>
-        <Txt style={{ color: '#D5F1E7', textAlign: 'center' }}>
-          {t('Your demo aid has been recorded.', 'Narekord na ang demo nga ayuda.')}
-        </Txt>
-        <View style={s.received}>
-          <Txt variant="small" style={{ color: '#D5F1E7', letterSpacing: 1 }}>
-            {t('YOU RECEIVED', 'IMONG NADAWAT')}
-          </Txt>
-          <Txt variant="number" style={{ color: c.card }}>
-            {peso(1500)}
-          </Txt>
-          <Txt variant="small" style={{ color: '#D5F1E7' }}>
-            {a.program}
-          </Txt>
-        </View>
-        <Txt variant="small" style={{ color: '#D5F1E7' }}>
-          {t('Added to your simulated wallet', 'Nadugang sa simulated wallet')}
-        </Txt>
-        <Button
-          variant="white"
-          style={{ width: '100%' }}
-          onPress={() => router.replace('/(tabs)/home')}
-        >
-          {t('Done', 'Nahuman')}
-        </Button>
-      </View>
-      <View style={{ paddingHorizontal: 20 }}>
-        <Notice tone="warning">
-          {t(
-            'Prototype simulation — no actual aid or money was released.',
-            'Prototype simulation — walay tinuod nga ayuda o kuwarta gipagawas.',
-          )}
-        </Notice>
-      </View>
-    </Page>
-  );
-}
-const s = StyleSheet.create({
-  claimSuccess: {
-    backgroundColor: c.green,
-    padding: 24,
-    alignItems: 'center',
-    gap: 20,
-  },
-  bigCheck: {
-    height: 106,
-    width: 106,
-    borderRadius: 53,
-    backgroundColor: '#32917C',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  received: {
-    padding: 22,
-    borderRadius: 14,
-    backgroundColor: '#32917C',
-    alignItems: 'center',
-    gap: 10,
-    width: '100%',
-  },
-});

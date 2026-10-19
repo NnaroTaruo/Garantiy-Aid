@@ -45,6 +45,9 @@ model Beneficiary {
   enrollments   Enrollment[]
   schedules     Schedule[]
   qrTokens      QrToken[]
+  claims        Claim[]
+  walletAccount WalletAccount?
+  transactions  Transaction[]
 
   @@index([barangayId])
   @@map("beneficiaries")
@@ -91,6 +94,7 @@ model Distribution {
   program           Program    @relation(fields: [programId], references: [programId])
   schedules         Schedule[]
   qrTokens          QrToken[]
+  claims            Claim[]
 
   @@unique([programId, distributionDate, location])
   @@index([distributionDate, status])
@@ -108,6 +112,7 @@ model Schedule {
   createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   distribution    Distribution @relation(fields: [distributionId], references: [distributionId], onDelete: Cascade)
   beneficiary     Beneficiary  @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
+  claim           Claim?
 
   @@unique([distributionId, beneficiaryId])
   @@unique([distributionId, queueNumber])
@@ -128,6 +133,62 @@ model QrToken {
 
   @@index([beneficiaryId, distributionId, qrStatus])
   @@map("qr_tokens")
+}
+
+model Claim {
+  claimId             String       @id @default(uuid()) @map("claim_id") @db.Uuid
+  beneficiaryId       String       @map("beneficiary_id") @db.Uuid
+  distributionId      String       @map("distribution_id") @db.Uuid
+  scheduleId          String       @unique @map("schedule_id") @db.Uuid
+  claimStatus         String       @default("pending") @map("claim_status") @db.VarChar(32)
+  verificationMethod  String?      @map("verification_method") @db.VarChar(32)
+  biometricVerified   Boolean      @default(false) @map("biometric_verified")
+  biometricScore      Decimal?     @map("biometric_score") @db.Decimal(5, 4)
+  qrVerified          Boolean      @default(false) @map("qr_verified")
+  isDuplicateFlag     Boolean      @default(false) @map("is_duplicate_flag")
+  claimedAt           DateTime?    @map("claimed_at") @db.Timestamptz(6)
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  beneficiary         Beneficiary  @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
+  distribution        Distribution @relation(fields: [distributionId], references: [distributionId])
+  schedule            Schedule     @relation(fields: [scheduleId], references: [scheduleId])
+  transaction         Transaction?
+
+  @@unique([beneficiaryId, distributionId])
+  @@index([beneficiaryId, claimStatus, createdAt])
+  @@map("claims")
+}
+
+model WalletAccount {
+  walletId          String        @id @default(uuid()) @map("wallet_id") @db.Uuid
+  beneficiaryId     String        @unique @map("beneficiary_id") @db.Uuid
+  balance           Decimal       @default(0) @db.Decimal(12, 2)
+  currency          String        @default("PHP") @db.Char(3)
+  accountStatus     String        @default("active") @map("account_status") @db.VarChar(32)
+  lastTransactionAt DateTime?     @map("last_transaction_at") @db.Timestamptz(6)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  beneficiary       Beneficiary   @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
+  transactions      Transaction[]
+
+  @@map("wallet_accounts")
+}
+
+model Transaction {
+  transactionId   String        @id @default(uuid()) @map("transaction_id") @db.Uuid
+  claimId         String        @unique @map("claim_id") @db.Uuid
+  walletId        String        @map("wallet_id") @db.Uuid
+  beneficiaryId   String        @map("beneficiary_id") @db.Uuid
+  amount          Decimal       @db.Decimal(12, 2)
+  transactionType String        @map("transaction_type") @db.VarChar(32)
+  referenceNo     String        @unique @map("reference_no") @db.VarChar(64)
+  status          String        @default("posted") @db.VarChar(32)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  claim           Claim         @relation(fields: [claimId], references: [claimId])
+  wallet          WalletAccount @relation(fields: [walletId], references: [walletId], onDelete: Cascade)
+  beneficiary     Beneficiary   @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
+
+  @@index([walletId, createdAt])
+  @@index([beneficiaryId, createdAt])
+  @@map("transactions")
 }
 
 model OtpChallenge {

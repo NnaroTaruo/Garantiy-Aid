@@ -124,6 +124,60 @@ export type ClaimPass = {
   };
 };
 
+export type ClaimRecord = {
+  id: string;
+  distributionId: string;
+  scheduleId: string;
+  status: string;
+  verificationMethod: string | null;
+  claimedAt: string | null;
+  createdAt: string;
+  date: string;
+  amount: number;
+  program: { id: string; code: string; name: string };
+};
+
+export type CurrentClaim = {
+  id: string | null;
+  distributionId: string;
+  scheduleId: string;
+  status: string;
+  verificationMethod: string | null;
+  claimedAt: string | null;
+  date: string;
+  queueNumber: number;
+  location: string;
+  amount: number;
+  program: { id: string; code: string; name: string };
+};
+
+export type WalletTransaction = {
+  id: string;
+  claimId: string;
+  amount: number;
+  type: string;
+  reference: string;
+  status: string;
+  createdAt: string;
+  claimStatus: string;
+  claimedAt: string | null;
+  date: string;
+  program: { id: string; code: string; name: string };
+};
+
+export type WalletOverview = {
+  wallet: {
+    id: string;
+    balance: number;
+    currency: string;
+    status: string;
+    lastTransactionAt: string | null;
+  } | null;
+  currentClaim: CurrentClaim | null;
+  claims: ClaimRecord[];
+  transactions: WalletTransaction[];
+};
+
 type OtpResponse = { data: { expiresInSeconds?: number; developmentOtp?: string } };
 
 export async function getBarangays() {
@@ -203,6 +257,14 @@ export async function issueClaimPass(accessToken: string) {
   return (
     await request<{ data: ClaimPass }>('/beneficiaries/me/claim-pass', {
       method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+  ).data;
+}
+
+export async function getWalletOverview(accessToken: string) {
+  return (
+    await request<{ data: WalletOverview }>('/beneficiaries/me/wallet', {
       headers: { Authorization: `Bearer ${accessToken}` },
     })
   ).data;

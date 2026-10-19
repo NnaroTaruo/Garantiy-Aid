@@ -1,10 +1,12 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import {
   ApiRequestError,
   getBeneficiaryOverview,
   getCurrentBeneficiary,
+  getWalletOverview,
   type Beneficiary,
   type BeneficiaryOverview,
+  type WalletOverview,
 } from './api';
 import { clearStoredToken, getStoredToken, storeToken } from './session-storage';
 
@@ -42,6 +44,10 @@ type DemoState = {
   overviewLoading: boolean;
   overviewError: boolean;
   refreshOverview: () => Promise<void>;
+  wallet: WalletOverview | null;
+  walletLoading: boolean;
+  walletError: boolean;
+  refreshWallet: () => Promise<void>;
   authLoading: boolean;
   authError: boolean;
   startSession: (token: string, beneficiary: Beneficiary) => Promise<void>;
@@ -54,8 +60,6 @@ type DemoState = {
   setFaceEnrolled: (value: boolean) => void;
   consentGiven: boolean;
   setConsentGiven: (value: boolean) => void;
-  claimCompleted: boolean;
-  setClaimCompleted: (value: boolean) => void;
   readNotifications: string[];
   markRead: (id: string) => void;
   reset: () => Promise<void>;
@@ -70,6 +74,9 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const [overview, setOverview] = useState<BeneficiaryOverview | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [overviewError, setOverviewError] = useState(false);
+  const [wallet, setWallet] = useState<WalletOverview | null>(null);
+  const [walletLoading, setWalletLoading] = useState(false);
+  const [walletError, setWalletError] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState(false);
   const [name, setName] = useState('Maria Santos');
@@ -77,8 +84,29 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     useState<RegistrationInfo>(emptyRegistration);
   const [faceEnrolled, setFaceEnrolled] = useState(false);
   const [consentGiven, setConsentGiven] = useState(false);
-  const [claimCompleted, setClaimCompleted] = useState(false);
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
+  const sessionVersion = useRef(0);
+  const renderedSessionVersion = sessionVersion.current;
+  const reset = async () => {
+    sessionVersion.current += 1;
+    setPhone('');
+    setAccessToken('');
+    setBeneficiary(null);
+    setOverview(null);
+    setOverviewLoading(false);
+    setOverviewError(false);
+    setWallet(null);
+    setWalletLoading(false);
+    setWalletError(false);
+    setAuthLoading(false);
+    setAuthError(false);
+    setName('Maria Santos');
+    setRegistrationState(emptyRegistration);
+    setFaceEnrolled(false);
+    setConsentGiven(false);
+    setReadNotifications([]);
+    await clearStoredToken();
+  };
   const applyBeneficiary = (beneficiary: Beneficiary) => {
     setBeneficiary(beneficiary);
     setPhone(beneficiary.contactNumber.replace(/^\+63/, ''));
@@ -88,74 +116,89 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         .join(' '),
     );
   };
-  const loadOverview = async (token: string) => {
+  // Ignore responses from sessions that were logged out or replaced.
+  const loadOverview = async (token: string, version: number) => {
+    if (!token || version !== sessionVersion.current) return;
     setOverviewLoading(true);
     setOverviewError(false);
     try {
-      setOverview(await getBeneficiaryOverview(token));
+      const nextOverview = await getBeneficiaryOverview(token);
+      if (version === sessionVersion.current) setOverview(nextOverview);
     } catch (error) {
+      if (version !== sessionVersion.current) return;
       if (error instanceof ApiRequestError && error.status === 401) {
-        await clearStoredToken();
-        setAccessToken('');
-        setBeneficiary(null);
-        setOverview(null);
+        await reset();
       } else {
         setOverviewError(true);
       }
     } finally {
-      setOverviewLoading(false);
+      if (version === sessionVersion.current) setOverviewLoading(false);
+    }
+  };
+  const loadWallet = async (token: string, version: number) => {
+    if (!token || version !== sessionVersion.current) return;
+    setWalletLoading(true);
+    setWalletError(false);
+    try {
+      const nextWallet = await getWalletOverview(token);
+      if (version === sessionVersion.current) setWallet(nextWallet);
+    } catch (error) {
+      if (version !== sessionVersion.current) return;
+      if (error instanceof ApiRequestError && error.status === 401) {
+        await reset();
+      } else {
+        setWalletError(true);
+      }
+    } finally {
+      if (version === sessionVersion.current) setWalletLoading(false);
     }
   };
   const restoreSession = async () => {
+    const version = ++sessionVersion.current;
     setAuthLoading(true);
     setAuthError(false);
     try {
       const token = await getStoredToken();
+      if (version !== sessionVersion.current) return;
       if (!token) {
-        setAccessToken('');
-        setBeneficiary(null);
-        setOverview(null);
+        await reset();
         return;
       }
       const beneficiary = await getCurrentBeneficiary(token);
+      if (version !== sessionVersion.current) return;
       setAccessToken(token);
       applyBeneficiary(beneficiary);
-      await loadOverview(token);
+      await Promise.all([loadOverview(token, version), loadWallet(token, version)]);
     } catch (error) {
+      if (version !== sessionVersion.current) return;
       if (error instanceof ApiRequestError && error.status === 401) {
-        await clearStoredToken();
-        setAccessToken('');
-        setBeneficiary(null);
-        setOverview(null);
+        await reset();
       } else {
         setAuthError(true);
       }
     } finally {
-      setAuthLoading(false);
+      if (version === sessionVersion.current) setAuthLoading(false);
     }
   };
   useEffect(() => {
     void restoreSession();
+    return () => { sessionVersion.current += 1; };
   }, []);
   const startSession = async (token: string, beneficiary: Beneficiary) => {
-    await storeToken(token);
-    setAccessToken(token);
-    applyBeneficiary(beneficiary);
-    await loadOverview(token);
-  };
-  const reset = async () => {
-    setPhone('');
-    setAccessToken('');
-    setBeneficiary(null);
+    const version = ++sessionVersion.current;
     setOverview(null);
+    setOverviewLoading(false);
     setOverviewError(false);
-    setName('Maria Santos');
-    setRegistrationState(emptyRegistration);
-    setFaceEnrolled(false);
-    setConsentGiven(false);
-    setClaimCompleted(false);
-    setReadNotifications([]);
-    await clearStoredToken();
+    setWallet(null);
+    setWalletLoading(false);
+    setWalletError(false);
+    await storeToken(token);
+    if (version !== sessionVersion.current) return;
+    setAccessToken(token);
+    setAuthLoading(false);
+    setAuthError(false);
+    applyBeneficiary(beneficiary);
+    await Promise.all([loadOverview(token, version), loadWallet(token, version)]);
   };
   return (
     <Context.Provider
@@ -169,7 +212,11 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         overview,
         overviewLoading,
         overviewError,
-        refreshOverview: () => loadOverview(accessToken),
+        refreshOverview: () => loadOverview(accessToken, renderedSessionVersion),
+        wallet,
+        walletLoading,
+        walletError,
+        refreshWallet: () => loadWallet(accessToken, renderedSessionVersion),
         authLoading,
         authError,
         startSession,
@@ -183,8 +230,6 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         setFaceEnrolled,
         consentGiven,
         setConsentGiven,
-        claimCompleted,
-        setClaimCompleted,
         readNotifications,
         markRead: (id) =>
           setReadNotifications((previous) =>
@@ -204,7 +249,7 @@ export function useDemo() {
   return state;
 }
 
-// Synthetic display data only. These are not government records or live appointments.
+// Synthetic display data for screens that are still explicitly labeled as previews.
 export const appointment = {
   program: '4Ps — Pantawid Pamilya',
   date: 'Thursday, July 10, 2025',
@@ -215,24 +260,6 @@ export const appointment = {
   amount: 1500,
   reference: 'GAI-2025-0612-047',
 };
-export const transactions = [
-  {
-    id: 'june',
-    title: 'Aid received',
-    date: 'June 12, 2025',
-    reference: appointment.reference,
-    amount: 1500,
-    status: 'received',
-  },
-  {
-    id: 'may',
-    title: 'Aid received',
-    date: 'May 28, 2025',
-    reference: 'GAI-2025-0528-047',
-    amount: 1500,
-    status: 'received',
-  },
-];
 export const notices = [
   {
     id: 'schedule',
@@ -242,15 +269,6 @@ export const notices = [
     bodyBs: 'Imong oras: Hulyo 10, 9:00–10:00 AM, Pila #047. Punta Princesa Hall.',
     date: 'July 2, 2025 · 10:00 AM',
     kind: 'schedule',
-  },
-  {
-    id: 'claim',
-    title: 'Claim successful',
-    titleBs: 'Malampuson ang pag-claim',
-    body: '₱1,500 from 4Ps was recorded on June 12. Check your wallet.',
-    bodyBs: 'Narekord ang ₱1,500 gikan sa 4Ps niadtong Hunyo 12. Tan-awa ang wallet.',
-    date: 'June 12, 2025 · 10:12 AM',
-    kind: 'claim',
   },
   {
     id: 'reminder',

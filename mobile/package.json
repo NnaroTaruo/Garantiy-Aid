@@ -35,6 +35,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
+    "test": "node --test test/*.test.cjs",
     "typecheck": "tsc --noEmit",
     "export:web": "expo export --platform web",
     "export:android": "expo export --platform android --output-dir dist-android"

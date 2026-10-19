@@ -276,6 +276,109 @@ app.get("/beneficiaries/me/overview", async (req, res) => {
   });
 });
 
+app.get("/beneficiaries/me/wallet", async (req, res) => {
+  const { beneficiary } = await requireBeneficiary(req);
+  const [wallet, claims, nextSchedule] = await Promise.all([
+    prisma.walletAccount.findUnique({
+      where: { beneficiaryId: beneficiary.beneficiaryId },
+      include: {
+        transactions: {
+          where: {
+            beneficiaryId: beneficiary.beneficiaryId,
+            claim: { beneficiaryId: beneficiary.beneficiaryId },
+          },
+          include: { claim: { include: { distribution: { include: { program: true } } } } },
+          orderBy: { createdAt: "desc" },
+        },
+      },
+    }),
+    prisma.claim.findMany({
+      where: { beneficiaryId: beneficiary.beneficiaryId },
+      include: { distribution: { include: { program: true } } },
+      orderBy: [{ claimedAt: "desc" }, { createdAt: "desc" }],
+    }),
+    findNextSchedule(beneficiary.beneficiaryId),
+  ]);
+  const currentRecord = nextSchedule
+    ? claims.find((claim) => claim.distributionId === nextSchedule.distributionId)
+    : undefined;
+  const transactionsByClaimId = new Map(
+    wallet?.transactions.map((transaction) => [transaction.claimId, transaction]) ?? [],
+  );
+
+  res.json({
+    data: {
+      wallet: wallet
+        ? {
+            id: wallet.walletId,
+            balance: Number(wallet.balance),
+            currency: wallet.currency,
+            status: wallet.accountStatus,
+            lastTransactionAt: wallet.lastTransactionAt?.toISOString() ?? null,
+          }
+        : null,
+      currentClaim: nextSchedule
+        ? {
+            id: currentRecord?.claimId ?? null,
+            distributionId: nextSchedule.distributionId,
+            scheduleId: nextSchedule.scheduleId,
+            status: currentRecord?.claimStatus ?? "not_claimed",
+            verificationMethod: currentRecord?.verificationMethod ?? null,
+            claimedAt: currentRecord?.claimedAt?.toISOString() ?? null,
+            date: nextSchedule.distribution.distributionDate.toISOString().slice(0, 10),
+            queueNumber: nextSchedule.queueNumber,
+            location: nextSchedule.distribution.location,
+            amount: Number(
+              (currentRecord && transactionsByClaimId.get(currentRecord.claimId)?.amount) ??
+                nextSchedule.distribution.program.grantAmount,
+            ),
+            program: {
+              id: nextSchedule.distribution.program.programId,
+              code: nextSchedule.distribution.program.programCode,
+              name: nextSchedule.distribution.program.programName,
+            },
+          }
+        : null,
+      claims: claims.map((claim) => ({
+        id: claim.claimId,
+        distributionId: claim.distributionId,
+        scheduleId: claim.scheduleId,
+        status: claim.claimStatus,
+        verificationMethod: claim.verificationMethod,
+        claimedAt: claim.claimedAt?.toISOString() ?? null,
+        createdAt: claim.createdAt.toISOString(),
+        date: claim.distribution.distributionDate.toISOString().slice(0, 10),
+        amount: Number(
+          transactionsByClaimId.get(claim.claimId)?.amount ?? claim.distribution.program.grantAmount,
+        ),
+        program: {
+          id: claim.distribution.program.programId,
+          code: claim.distribution.program.programCode,
+          name: claim.distribution.program.programName,
+        },
+      })),
+      transactions:
+        wallet?.transactions.map((transaction) => ({
+          id: transaction.transactionId,
+          claimId: transaction.claimId,
+          amount: Number(transaction.amount),
+          type: transaction.transactionType,
+          reference: transaction.referenceNo,
+          status: transaction.status,
+          createdAt: transaction.createdAt.toISOString(),
+          claimStatus: transaction.claim.claimStatus,
+          claimedAt: transaction.claim.claimedAt?.toISOString() ?? null,
+          date: transaction.claim.distribution.distributionDate.toISOString().slice(0, 10),
+          program: {
+            id: transaction.claim.distribution.program.programId,
+            code: transaction.claim.distribution.program.programCode,
+            name: transaction.claim.distribution.program.programName,
+          },
+        })) ?? [],
+    },
+  });
+});
+
 app.post("/beneficiaries/me/claim-pass", async (req, res) => {
   const { beneficiary } = await requireBeneficiary(req);
   const schedule = await findNextSchedule(beneficiary.beneficiaryId);
