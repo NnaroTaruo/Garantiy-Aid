@@ -291,6 +291,22 @@ test('the profile API keeps server field errors for the form', async () => {
     (error) => error.status === 422 && error.fields.firstName === 'Use letters');
 });
 
+test('shared backend requests preserve the mobile prefix and translate validation details', async () => {
+  const source = loadSource('api.ts', { 'react-native': { Platform: { OS: 'web' } } }, {
+    process: { env: { EXPO_PUBLIC_API_URL: 'http://127.0.0.1:4000/api/v1/mobile/' } }, AbortController, setTimeout, clearTimeout,
+    fetch: async (url, init) => {
+      assert.equal(url, 'http://127.0.0.1:4000/api/v1/mobile/beneficiaries/me');
+      assert.equal(init.headers.Authorization, 'Bearer mobile-session');
+      return { status: 400, ok: false, json: async () => ({ success: false, error: {
+        code: 'VALIDATION_ERROR', message: 'Correct your profile',
+        details: { fields: [{ field: 'firstName', message: 'Use letters' }] },
+      } }) };
+    },
+  });
+  await assert.rejects(source.updateProfile('mobile-session', { firstName: '123' }),
+    (error) => error.status === 400 && error.fields.firstName === 'Use letters');
+});
+
 test('a pre-upload document list cannot hide a confirmed upload', async () => {
   const oldList = deferred();
   let loads = 0;

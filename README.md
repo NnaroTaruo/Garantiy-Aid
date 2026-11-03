@@ -11,6 +11,8 @@ Registration, generated OTP verification, persistent sessions, profile loading a
 
 The latest update connects **Profile > Enrollment documents** to private uploads and saved document records. PDF, JPEG, and PNG files up to 5 MB are accepted, with file-type checks, safe retries, account isolation, and received status. Profile edits, the notification inbox, and read state also persist across logout/login. Receiving a document does not approve enrollment; staff review remains separate.
 
+Shared staff-backend integration has started: beneficiary registration, development OTP, sessions/logout, and profile access are implemented in a separate checkout of the team's backend. The [integration guide](mobile/docs/shared-backend-integration.md) includes the portable backend patch, checks, and remaining gaps. These changes are local and awaiting teammate review, not deployed to the shared service.
+
 Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. The READMEs cover the newer notification, profile-editing, and document-upload milestones.
 
 If the PDF preview does not open, use the [direct PDF download](https://raw.githubusercontent.com/NnaroTaruo/Garantiy-Aid/main/output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf).

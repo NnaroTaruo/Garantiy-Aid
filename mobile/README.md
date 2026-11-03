@@ -2,6 +2,8 @@
 
 React Native + Expo beneficiary frontend built from Ronan's Figma mobile designs.
 
+The [shared-backend integration guide](docs/shared-backend-integration.md) covers registration/OTP/session/profile access through the staff backend. This phase is implemented and tested locally, with a portable backend patch for teammate review. Other features still need shared endpoints; the default setup below continues to use the original mobile backend.
+
 ## Run in the browser
 
 Start the [backend API](../backend/README.md) first. From the repository root, open another PowerShell terminal:

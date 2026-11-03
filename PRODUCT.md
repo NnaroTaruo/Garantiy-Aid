@@ -18,6 +18,8 @@ Social welfare beneficiaries in selected Cebu City barangays. Ronan is responsib
 
 Help beneficiaries register, view an assigned distribution schedule and queue number, present a QR claim pass, and view claim records and updates.
 
+Shared-backend integration began on October 30, 2026 against the team's Express backend (Bryllando/garantiyaid-backend). Phase 1 adds separate beneficiary mobile accounts, development OTP/session access, active service areas, and profile read/edit using the same Beneficiary records as staff. It is implemented in a local feature checkout with a portable review patch, not merged or deployed upstream. Other mobile features still require shared endpoints; the original mobile backend remains available independently. Phone ownership does not approve beneficiary eligibility, and existing staff records are not automatically linked by phone/name.
+
 ## Operating Context
 
 The manuscript proposes one REST backend shared by the mobile and web apps. The supplied ERD defines beneficiaries, schedules, QR tokens, claims, notifications, enrollment, documents, consent, wallet accounts, and transactions. The local API now provides the beneficiary-facing account and record endpoints. Authorized staff scheduling actions, QR scanning, identity verification, and atomic claim completion still need to be integrated through the shared backend and staff web application.

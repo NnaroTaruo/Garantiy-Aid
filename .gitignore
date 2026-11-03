@@ -1,5 +1,6 @@
 .npm-cache/
 .tmp/
+/shared-backend/
 .codex-doc-review/
 mobile/node_modules/
 mobile/.expo/

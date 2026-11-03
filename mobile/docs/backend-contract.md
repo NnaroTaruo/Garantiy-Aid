@@ -2,6 +2,8 @@
 
 These are the mobile frontend's requirements, derived from the manuscript and latest ERD. The first beneficiary-account endpoints now live in `../../backend`; the remaining rows describe later milestones.
 
+The original local API below remains available. The new [shared staff-backend integration](shared-backend-integration.md) implements the registration/OTP/session/profile contract under `/api/v1/mobile` in the teammate's backend checkout. Other routes below are not yet implemented there. Its schema, sessions, migrations, and data must not be mixed with the original local backend.
+
 ## Implemented mobile API
 
 | Endpoint | Mobile use |

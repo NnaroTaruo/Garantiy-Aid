@@ -1,5 +1,14 @@
 # Frontend verification
 
+Shared-backend account milestone checked on October 30, 2026:
+
+- Implemented a local feature branch based on the team's backend `050c389`: separate beneficiary accounts, development OTP, hashed/revocable sessions, public active barangays, own-profile GET/PATCH, and audit attribution. Existing staff authentication remains separate.
+- All 31 mobile regression tests and the mobile TypeScript check pass. The shared backend's default suite reports 320 passed, seven skipped, and zero failures; the skips are opt-in database suites.
+- Both explicit database suites pass: the shared backend's auth/security integration and `mobile/npm run test:shared`, which calls the actual mobile TypeScript API through real HTTP and PostgreSQL. Confirmed mobile registration/profile edits are visible through authenticated staff list/detail endpoints; logout revokes access. Neither is a live staff-browser or physical-device walkthrough.
+- OTP checks cover expiry, committed failed guesses, cooldown, five-guess lockout, simultaneous single-use verification, inactive accounts, session expiry/revocation, and staff/mobile token separation. Mobile verification does not set staff `isVerified` or create an enrollment/wallet.
+- New migrations apply on a separate Prisma development instance at 51234 with pool size one. The original mobile database at 51214 still matches its original Prisma schema. New mobile auth tables match the shared schema; the shared repository already has unrelated FK/index/default drift in its older migrations, documented in the handoff. No corrective migration for that inherited drift was applied.
+- Source changes are local and preserved as a teammate-review patch. Shared document intake/review, overview/schedules, QR, wallet/claims, and notifications remain unimplemented under `/api/v1/mobile`. The original mobile `.env` was preserved. A pre-existing trailing-space edit in `mobile/src/api.ts` was left untouched.
+
 Document-upload milestone checked on October 20, 2026:
 
 - Committed the preceding profile-editing milestone as `a993769` before starting uploads.

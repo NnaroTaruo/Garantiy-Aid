@@ -31,7 +31,9 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = 10_000):
         body?.error?.code ?? 'REQUEST_FAILED',
         body?.error?.message ?? 'The request could not be completed.',
         response.status,
-        body?.error?.fields,
+        body?.error?.fields ?? (Array.isArray(body?.error?.details?.fields)
+          ? Object.fromEntries(body.error.details.fields.map((item: { field: string; message: string }) => [item.field, item.message]))
+          : undefined),
       );
     }
     return body as T;
