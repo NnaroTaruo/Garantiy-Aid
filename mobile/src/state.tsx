@@ -55,7 +55,7 @@ type DemoState = {
   documentsLoading: boolean;
   documentsError: boolean;
   refreshDocuments: () => Promise<void>;
-  submitDocument: (file: DocumentPickerAsset, docType: DocumentType) => Promise<BeneficiaryDocument | null>;
+  submitDocument: (file: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string) => Promise<BeneficiaryDocument | null>;
   overview: BeneficiaryOverview | null;
   overviewLoading: boolean;
   overviewError: boolean;
@@ -112,6 +112,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsError, setDocumentsError] = useState(false);
   const documentRequest = useRef(0);
+  const overviewRequest = useRef(0);
   const reset = async () => {
     sessionVersion.current += 1;
     setPhone('');
@@ -166,20 +167,21 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   };
   const loadOverview = async (token: string, version: number) => {
     if (!token || version !== sessionVersion.current) return;
+    const request = ++overviewRequest.current;
     setOverviewLoading(true);
     setOverviewError(false);
     try {
       const nextOverview = await getBeneficiaryOverview(token);
-      if (version === sessionVersion.current) setOverview(nextOverview);
+      if (version === sessionVersion.current && request === overviewRequest.current) setOverview(nextOverview);
     } catch (error) {
-      if (version !== sessionVersion.current) return;
+      if (version !== sessionVersion.current || request !== overviewRequest.current) return;
       if (error instanceof ApiRequestError && error.status === 401) {
         await reset();
       } else {
         setOverviewError(true);
       }
     } finally {
-      if (version === sessionVersion.current) setOverviewLoading(false);
+      if (version === sessionVersion.current && request === overviewRequest.current) setOverviewLoading(false);
     }
   };
   const loadWallet = async (token: string, version: number) => {
@@ -254,13 +256,14 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       if (version === sessionVersion.current && request === documentRequest.current) setDocumentsLoading(false);
     }
   };
-  const submitDocument = async (file: DocumentPickerAsset, docType: DocumentType) => {
+  const submitDocument = async (file: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string) => {
     const version = renderedSessionVersion;
     if (!accessToken || version !== sessionVersion.current) return null;
     try {
-      const saved = await uploadDocument(accessToken, file, docType);
+      const saved = await uploadDocument(accessToken, file, docType, replacesDocumentId);
       if (version !== sessionVersion.current) return null;
-      setDocuments((previous) => [saved, ...(previous ?? []).filter((item) => item.id !== saved.id)]);
+      setDocuments((previous) => [saved, ...(previous ?? []).filter((item) => item.id !== saved.id).map((item) =>
+        item.id === saved.replacesDocumentId ? { ...item, status: 'superseded', canReplace: false } : item)]);
       // A newer list request prevents an older pre-upload response hiding the saved document.
       void loadDocuments(accessToken, version);
       return saved;

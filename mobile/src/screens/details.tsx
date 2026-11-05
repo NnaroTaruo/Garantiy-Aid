@@ -933,6 +933,9 @@ function EnrollmentStatus() {
         <Button variant="outline" onPress={() => go('support')}>
           {t('Contact facilitator', 'Kontaka ang facilitator')}
         </Button>
+        <Button variant="outline" onPress={() => void refreshOverview()}>
+          {t('Refresh status', 'I-refresh ang status')}
+        </Button>
       </>
     );
   }
@@ -941,19 +944,27 @@ function EnrollmentStatus() {
       {enrollments.map((enrollment) => {
         const approved = enrollment.status === 'approved' || enrollment.status === 'active';
         const rejected = enrollment.status === 'rejected';
+        const statusLabels: Record<string, string> = {
+          pending: t('Pending', 'Naghulat'),
+          for_validation: t('For validation', 'Alang sa validation'),
+          needs_correction: t('Needs correction', 'Kinahanglan og pagtul-id'),
+          approved: t('Approved', 'Giaprobahan'), active: t('Active', 'Aktibo'),
+          rejected: t('Rejected', 'Gisalikway'), suspended: t('Suspended', 'Gisuspenso'),
+          withdrawn: t('Withdrawn', 'Gibawi'),
+        };
         return (
           <Card key={enrollment.id}>
             <View
               style={[
                 styles.row,
-                { justifyContent: 'space-between', alignItems: 'flex-start' },
+                { justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' },
               ]}
             >
-              <Txt variant="label" style={{ flex: 1 }}>
+              <Txt variant="label" style={{ flex: 1, minWidth: 140 }}>
                 {enrollment.program.name}
               </Txt>
               <Badge tone={approved ? 'success' : rejected ? 'error' : 'warning'}>
-                {formatStatus(enrollment.status)}
+                {statusLabels[enrollment.status] ?? formatStatus(enrollment.status)}
               </Badge>
             </View>
             <DetailRow
@@ -966,8 +977,19 @@ function EnrollmentStatus() {
             />
             <DetailRow
               label={t('Grant amount', 'Kantidad sa ayuda')}
-              value={peso(enrollment.program.grantAmount)}
+              value={enrollment.program.grantAmount == null
+                ? t('Not specified', 'Wala gitakda') : peso(enrollment.program.grantAmount)}
             />
+            {enrollment.program.description ? <Txt variant="small">{enrollment.program.description}</Txt> : null}
+            {enrollment.reviewNotes ? (
+              <View style={{ gap: 4 }}>
+                <Txt variant="label">{t('Staff feedback', 'Feedback sa staff')}</Txt>
+                <Txt>{enrollment.reviewNotes}</Txt>
+              </View>
+            ) : null}
+            {enrollment.reviewedAt ? (
+              <DetailRow label={t('Reviewed', 'Girepaso')} value={formatDateTime(enrollment.reviewedAt)} />
+            ) : null}
           </Card>
         );
       })}
@@ -1004,6 +1026,7 @@ function DocumentUploads() {
   const [errorCode, setErrorCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [uploaded, setUploaded] = useState<BeneficiaryDocument | null>(null);
+  const [replacing, setReplacing] = useState<BeneficiaryDocument | null>(null);
   const busyRef = useRef(false);
   const active = useRef(true);
   useEffect(() => {
@@ -1047,10 +1070,11 @@ function DocumentUploads() {
     setErrorCode('');
     setUploaded(null);
     try {
-      const saved = await submitDocument(file, docType);
+      const saved = await submitDocument(file, docType, replacing?.id);
       if (active.current && saved) {
         setUploaded(saved);
         setFile(null);
+        setReplacing(null);
       }
     } catch (error) {
       if (active.current) setErrorCode(error instanceof ApiRequestError ? error.code : 'UPLOAD_FAILED');
@@ -1061,7 +1085,7 @@ function DocumentUploads() {
   };
   const errorMessage = errorCode === 'DOCUMENT_TOO_LARGE' || errorCode === 'PAYLOAD_TOO_LARGE'
     ? t('Choose a file up to 5 MB.', 'Pagpili og file nga hangtod 5 MB.')
-    : errorCode === 'UNSUPPORTED_FILE_TYPE' || errorCode === 'FILE_TYPE_MISMATCH'
+    : errorCode === 'UNSUPPORTED_FILE_TYPE' || errorCode === 'FILE_TYPE_MISMATCH' || errorCode === 'INVALID_DOCUMENT_CONTENT'
       ? t('Choose a valid PDF, JPEG, or PNG file with the matching extension.', 'Pagpili og hustong PDF, JPEG, o PNG nga file nga sakto ang extension.')
       : errorCode === 'EMPTY_DOCUMENT'
         ? t('The file is empty. Choose another file.', 'Walay sulod ang file. Pagpili og lain.')
@@ -1069,7 +1093,9 @@ function DocumentUploads() {
           ? t('The file could not be read. Choose it again.', 'Dili mabasa ang file. Pilia kini pag-usab.')
           : errorCode === 'INVALID_FILE_NAME'
             ? t('Choose a file with a simple name, up to 255 characters.', 'Pagpili og file nga yano ang ngalan, hangtod 255 ka karakter.')
-            : t('The upload could not be confirmed. Check your connection and try again.', 'Wala makumpirma ang upload. Susihon ang koneksyon ug sulayi pag-usab.');
+            : errorCode === 'DOCUMENT_STATUS_CHANGED' || errorCode === 'DOCUMENT_NOT_REPLACEABLE'
+              ? t('The document status changed. Refresh your documents before uploading a correction.', 'Nausab ang kahimtang sa dokumento. I-refresh ang listahan sa dili pa mag-upload og pagtul-id.')
+              : t('The upload could not be confirmed. Check your connection and try again.', 'Wala makumpirma ang upload. Susihon ang koneksyon ug sulayi pag-usab.');
   return (
     <>
       <Notice>
@@ -1078,6 +1104,12 @@ function DocumentUploads() {
           'I-upload ang dokumento nga gipangayo sa facilitator. PDF, JPEG, o PNG, hangtod 5 MB. Ang pagdawat sa file dili pag-apruba sa enrollment.',
         )}
       </Notice>
+      {replacing ? <>
+        <Notice>{t('Correcting: ', 'Gitul-id: ')}{replacing.originalName}{'\n'}{t('Choose the corrected file below. It will be sent for another staff review.', 'Pilia ang gitul-id nga file sa ubos. Ipadala kini alang sa laing review sa staff.')}</Notice>
+        <Button variant="outline" disabled={busy} onPress={() => { setReplacing(null); setFile(null); setErrorCode(''); setDocType('proof_of_residency'); }}>
+          {t('Cancel correction', 'Kanselaha ang pagtul-id')}
+        </Button>
+      </> : <>
       <Txt variant="label">{t('Document category', 'Klase sa dokumento')}</Txt>
       <View accessibilityRole="radiogroup" accessibilityLabel={t('Document category', 'Klase sa dokumento')} style={{ gap: 8 }}>
         {categories.map((category) => (
@@ -1091,6 +1123,7 @@ function DocumentUploads() {
           </Pressable>
         ))}
       </View>
+      </>}
       {file && <Card>
         <Txt variant="label">{file.name}</Txt>
         <Txt variant="small">{file.size === undefined ? t('Size will be checked before upload.', 'Susihon ang gidak-on sa dili pa i-upload.') : `${(file.size / 1024).toFixed(1)} KB`}</Txt>
@@ -1098,7 +1131,7 @@ function DocumentUploads() {
       {errorCode ? <Notice tone="error">{errorMessage}</Notice> : null}
       {uploaded && (
         <Notice tone="success">
-          {t('Received: ', 'Nadawat: ')}{uploaded.originalName}
+          {t('Upload confirmed: ', 'Nakumpirma ang upload: ')}{uploaded.originalName}
         </Notice>
       )}
       <Button variant="outline" icon={FileText} disabled={busy} onPress={() => void pick()}>
@@ -1116,9 +1149,17 @@ function DocumentUploads() {
           <Txt variant="label">{document.originalName}</Txt>
           <Txt variant="small">{categories.find((category) => category.value === document.docType)?.label ?? formatStatus(document.docType)}</Txt>
           <Txt variant="small">{`${(document.sizeBytes / 1024).toFixed(1)} KB · ${formatDateTime(document.createdAt)}`}</Txt>
-          <Badge tone={document.status === 'verified' ? 'success' : document.status === 'rejected' ? 'error' : 'warning'}>
-            {document.status === 'received' ? t('Received · awaiting staff review', 'Nadawat · naghulat sa review sa staff') : formatStatus(document.status)}
+          <Badge tone={document.status === 'verified' || document.status === 'accepted' ? 'success' : document.status === 'rejected' ? 'error' : 'warning'}>
+            {document.status === 'received' ? t('Received · awaiting staff review', 'Nadawat · naghulat sa review sa staff')
+              : document.status === 'accepted' || document.status === 'verified' ? t('Accepted', 'Gidawat')
+                : document.status === 'rejected' ? t('Rejected · correction needed', 'Gisalikway · kinahanglan tul-iron')
+                  : document.status === 'superseded' ? t('Replaced by a corrected document', 'Napulihan sa gitul-id nga dokumento') : formatStatus(document.status)}
           </Badge>
+          {document.reviewedAt && <Txt variant="small">{t('Reviewed: ', 'Gi-review: ')}{formatDateTime(document.reviewedAt)}</Txt>}
+          {document.reviewNotes && <Notice tone={document.status === 'rejected' ? 'error' : 'info'}>{t('Staff feedback: ', 'Tubag sa staff: ')}{document.reviewNotes}</Notice>}
+          {document.canReplace && <Button variant="outline" disabled={busy} onPress={() => {
+            setReplacing(document); setDocType(document.docType); setFile(null); setUploaded(null); setErrorCode('');
+          }}>{t('Upload corrected document', 'I-upload ang gitul-id nga dokumento')}</Button>}
         </Card>
       ))}
       <Button variant="outline" loading={documentsLoading} disabled={busy} onPress={() => void refreshDocuments()}>{t('Refresh documents', 'I-refresh ang mga dokumento')}</Button>

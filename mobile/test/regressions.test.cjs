@@ -37,6 +37,85 @@ const overview = (id) => ({ enrollments: [{ id }], nextSchedule: null });
 const wallet = (id) => ({ wallet: { id, balance: 1500 }, currentClaim: null, claims: [], transactions: [] });
 const document = (id) => ({ id, docType: 'proof_of_residency', originalName: `${id}.pdf`, mimeType: 'application/pdf', sizeBytes: 30, status: 'received', createdAt: '2026-10-20T01:00:00Z' });
 
+test('existing accounts finish signup through the correct login or registration verification', async () => {
+  for (const scenario of ['verified-signup', 'pending-signup', 'login']) {
+    let cursor = 0, navigation, destination, session;
+    let params = { step: scenario === 'login' ? 'login' : 'mobile-number' };
+    const slots = [], requests = [], gate = deferred();
+    const state = {
+      phone: '9175550999', setPhone: (phone) => { state.phone = phone; }, t: (en) => en,
+      registration: { firstName: 'Test', lastName: 'Beneficiary', birthDate: '01/01/2000',
+        sex: 'Female', address: '12 Test Street', barangayId: 'test-area' },
+      startSession: async (token, owner) => { session = { token, owner }; },
+    };
+    const useState = (initial) => {
+      const index = cursor++;
+      if (!(index in slots)) slots[index] = initial;
+      return [slots[index], (value) => { slots[index] = value; }];
+    };
+    const components = new Proxy({}, { get: (_, key) => key === 'flow'
+      ? (step, values) => { navigation = { step, ...values }; } : String(key) });
+    const source = loadSource('screens/entry.tsx', {
+      react: { createElement: (type, props, ...children) => ({ type, props, children }),
+        useState, useRef: (initial) => useState({ current: initial })[0], useEffect: () => {} },
+      'react-native': { StyleSheet: { create: (styles) => styles }, TextInput: 'TextInput' },
+      'expo-router': { useLocalSearchParams: () => params,
+        router: { replace: (route) => { destination = route; } } },
+      'expo-camera': {}, 'expo-status-bar': {}, 'lucide-react-native': components,
+      '../components': components, '../theme': { colors: {}, fonts: {} },
+      '../state': { useDemo: () => state },
+      '../api': {
+        ApiRequestError,
+        registerBeneficiary: async () => {
+          requests.push('create');
+          await gate.promise;
+          throw new ApiRequestError(409, undefined, 'PHONE_ALREADY_REGISTERED');
+        },
+        requestOtp: async (phone, purpose) => {
+          assert.equal(phone, state.phone);
+          requests.push(purpose);
+          await gate.promise;
+          if (scenario === 'verified-signup' && purpose === 'register') {
+            throw new ApiRequestError(409, undefined, 'ACCOUNT_ALREADY_VERIFIED');
+          }
+          return { developmentOtp: '123456' };
+        },
+        verifyOtp: async (phone, purpose, code) => {
+          assert.equal(phone, state.phone);
+          assert.equal(purpose, scenario === 'pending-signup' ? 'register' : 'login');
+          assert.equal(code, '123456');
+          return { accessToken: 'test-session', beneficiary: beneficiary('owner') };
+        },
+      },
+    });
+    const render = () => {
+      cursor = 0;
+      const screen = source.EntryFlow();
+      return screen.type(screen.props);
+    };
+    const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes)
+      : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+    const send = nodes(render().props.footer).find((node) => node.type === 'Button').props.onPress;
+    const sending = send();
+    await send(); // A second tap while the first request is pending must not issue another code.
+    gate.resolve();
+    await sending;
+    assert.deepEqual(requests, scenario === 'login' ? ['login']
+      : scenario === 'pending-signup' ? ['create', 'register'] : ['create', 'register', 'login']);
+    assert.equal(navigation.step, 'otp');
+    assert.equal(navigation.developmentOtp, '123456');
+    assert.equal(navigation.intent, scenario === 'pending-signup' ? 'register' : 'login');
+    params = navigation;
+    slots.length = 0;
+    nodes(render()).find((node) => node.type === 'TextInput').props.onChangeText('123456');
+    await render().props.footer.props.onPress();
+    assert.equal(session.token, 'test-session');
+    assert.equal(session.owner.id, 'owner');
+    if (scenario === 'pending-signup') assert.equal(navigation.step, 'consent');
+    else assert.equal(destination, '/(tabs)/home');
+  }
+});
+
 function provider(api = {}, storage = {}) {
   const slots = [];
   let cursor = 0;
@@ -101,6 +180,91 @@ test('logout discards pending wallet and schedule responses', async () => {
   assert.equal(render().overview, null);
   assert.equal(render().walletLoading, false);
   assert.equal(render().overviewLoading, false);
+});
+
+test('the latest schedule refresh wins without an older response changing loading or errors', async () => {
+  for (const order of ['older-first', 'newer-first']) {
+    const older = deferred(), newer = deferred();
+    let loads = 0;
+    const render = provider({ getBeneficiaryOverview: () => ++loads === 1
+      ? overview('initial') : loads === 2 ? older.promise : newer.promise });
+    await render().startSession('owner', beneficiary('owner'));
+    const oldRequest = render().refreshOverview(), newRequest = render().refreshOverview();
+    if (order === 'older-first') {
+      older.resolve(overview('outdated'));
+      await oldRequest;
+      assert.equal(render().overviewLoading, true);
+      assert.equal(render().overview.enrollments[0].id, 'initial');
+    }
+    newer.resolve(overview('current'));
+    await newRequest;
+    if (order === 'newer-first') older.reject(new Error('Old connection failed'));
+    await oldRequest;
+    assert.equal(render().overview.enrollments[0].id, 'current');
+    assert.equal(render().overviewLoading, false);
+    assert.equal(render().overviewError, false);
+  }
+});
+
+test('Home, schedule and enrollment screens render shared records and honest states in both languages', () => {
+  let page = 'enrollment-status', refreshes = 0;
+  const state = {
+    name: 'Test beneficiary', faceEnrolled: true, notifications: [], overview: null,
+    overviewLoading: true, overviewError: false, t: (en) => en,
+    refreshOverview: async () => { refreshes++; },
+  };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const mocks = {
+    react: { createElement: (type, props, ...children) => ({ type, props, children }),
+      useState: (initial) => [initial, () => {}], useRef: () => ({ current: false }), useEffect: () => {} },
+    'react-native': { StyleSheet: { create: (styles) => styles } },
+    'expo-router': { useLocalSearchParams: () => ({ page }) },
+    'lucide-react-native': components, '../components': components,
+    '../state': { useDemo: () => state, peso: String }, '../api': {},
+    '../format': loadSource('format.ts', {}), '../theme': { colors: {}, fonts: {} },
+  };
+  const main = loadSource('screens/main.tsx', mocks);
+  const details = loadSource('screens/details.tsx', { ...mocks, './main': { s: {} },
+    'expo-document-picker': {}, 'react-native-qrcode-svg': 'QRCode' });
+  const detail = () => details.DetailScreen().children[0].children[0].type();
+  const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes)
+    : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  const text = (tree) => JSON.stringify(tree);
+  assert.ok(text(main.HomeScreen()).includes('Loading your schedule'));
+  assert.ok(text(detail()).includes('Loading your enrollment'));
+  assert.ok(!text(detail()).includes('No program enrollment'));
+  state.overviewLoading = false; state.overviewError = true;
+  assert.ok(text(main.HomeScreen()).includes('Your enrollment and schedule could not be loaded.'));
+  assert.ok(!text(main.HomeScreen()).includes('No claiming schedule yet'));
+  assert.ok(text(detail()).includes('Your enrollment could not be loaded.'));
+  state.overviewError = false;
+  state.overview = { enrollments: [], nextSchedule: null };
+  assert.ok(text(detail()).includes('No program enrollment is recorded'));
+  nodes(detail()).find(node => node.type === 'Button' && node.children.includes('Refresh status')).props.onPress();
+  nodes(main.HomeScreen()).find(node => node.type === 'Button' && node.children.includes('Refresh schedule')).props.onPress();
+  assert.equal(refreshes, 2);
+  state.overview.enrollments = [{ id: 'enrollment', enrollmentDate: '2026-11-01', status: 'needs_correction',
+    reviewNotes: 'Please correct the sample details. 保留原文', reviewedAt: '2026-11-03T00:00:00Z',
+    program: { id: 'program', name: 'Saved program', code: 'TEST', grantAmount: null, description: 'Saved program details' } }];
+  assert.ok(text(detail()).includes('Needs correction'));
+  assert.ok(text(detail()).includes('Not specified'));
+  assert.ok(text(detail()).includes('Please correct the sample details. 保留原文'));
+  state.t = (_en, bs) => bs;
+  assert.ok(text(detail()).includes('Kinahanglan og pagtul-id'));
+  assert.ok(text(detail()).includes('Wala gitakda'));
+  assert.ok(text(detail()).includes('Please correct the sample details. 保留原文'));
+  state.t = (en) => en;
+  page = 'schedule';
+  assert.ok(text(detail()).includes('No claiming schedule has been assigned'));
+  state.overview.nextSchedule = { id: 'schedule', status: 'scheduled', date: '2026-11-10',
+    slotStart: '2026-11-09T16:15:00Z', slotEnd: '2026-11-09T16:45:00Z', queueNumber: 47,
+    location: 'Assigned session venue', program: { name: 'Saved program' } };
+  for (const tree of [detail(), main.HomeScreen()]) {
+    assert.ok(text(tree).includes('Assigned session venue'));
+    assert.ok(text(tree).includes('#047'));
+    assert.ok(text(tree).includes('12:15 AM'));
+    assert.ok(!text(tree).includes('No claiming schedule'));
+  }
 });
 
 for (const outcome of ['success', 'unauthorized']) {
@@ -404,6 +568,54 @@ for (const platform of ['web', 'android']) {
   });
 }
 
+for (const platform of ['web', 'android']) {
+  test(`${platform} shared document uploads use multipart and preserve correction IDs`, async () => {
+    class Multipart {
+      constructor() { this.values = new Map(); }
+      append(key, value, name) { this.values.set(key, { value, name }); }
+    }
+    const bytes = new TextEncoder().encode('%PDF-1.4\nSynthetic\n%%EOF').buffer;
+    const asset = { name: 'Sample.pdf', uri: 'file:///cache/sample.pdf', file: new Blob([bytes]) };
+    const source = loadSource('api.ts', {
+      'react-native': { Platform: { OS: platform } },
+      'expo-file-system': { File: class { get size() { return bytes.byteLength; } async arrayBuffer() { return bytes; } } },
+    }, {
+      process: { env: { EXPO_PUBLIC_API_URL: 'http://127.0.0.1:4000/api/v1/mobile' } },
+      AbortController, setTimeout, clearTimeout, FormData: Multipart, Blob,
+      fetch: async (url, init) => {
+        assert.equal(url, 'http://127.0.0.1:4000/api/v1/mobile/beneficiaries/me/documents/old-id/replacement');
+        assert.equal(init.headers['Content-Type'], undefined);
+        assert.equal(init.headers.Authorization, 'Bearer shared-owner');
+        assert.equal(init.body.values.get('documentType').value, 'BIRTH_CERTIFICATE');
+        const file = init.body.values.get('file');
+        if (platform === 'web') { assert.equal(file.value.size, bytes.byteLength); assert.equal(file.name, asset.name); }
+        else { assert.equal(file.value.uri, asset.uri); assert.equal(file.value.type, 'application/pdf'); assert.equal(file.value.name, asset.name); }
+        return { status: 201, ok: true, json: async () => ({ data: document('correction') }) };
+      },
+    });
+    assert.equal((await source.uploadDocument('shared-owner', asset, 'birth_certificate', 'old-id')).id, 'correction');
+  });
+}
+
+test('a confirmed correction immediately supersedes the old document in account state', async () => {
+  const old = { ...document('old'), status: 'rejected', canReplace: true };
+  const corrected = { ...document('new'), replacesDocumentId: 'old' };
+  const refreshed = deferred();
+  let loads = 0, replacedId;
+  const render = provider({
+    getDocuments: () => ++loads === 1 ? [old] : refreshed.promise,
+    uploadDocument: async (_token, _file, _type, id) => { replacedId = id; return corrected; },
+  });
+  await render().startSession('owner', beneficiary('owner'));
+  await render().refreshDocuments();
+  await render().submitDocument({}, 'proof_of_residency', 'old');
+  assert.equal(replacedId, 'old');
+  assert.equal(render().documents.find(item => item.id === 'old').status, 'superseded');
+  assert.equal(render().documents.find(item => item.id === 'old').canReplace, false);
+  refreshed.resolve([corrected, { ...old, status: 'superseded', canReplace: false }]);
+  await new Promise(setImmediate);
+});
+
 for (const newerToken of [null, 'new']) {
   test(`native storage keeps logout/login order with final token ${newerToken}`, async () => {
     const waitingWrite = deferred(), started = deferred();
@@ -625,8 +837,8 @@ test('document selection, uploading, failure retry, and received status follow s
   const state = {
     beneficiary: beneficiary('owner'), documents: null, documentsLoading: true, documentsError: false,
     t: (en) => en, refreshDocuments: async () => {},
-    submitDocument: async (file, docType) => {
-      writes++; sent = { file, docType };
+    submitDocument: async (file, docType, replacesDocumentId) => {
+      writes++; sent = { file, docType, replacesDocumentId };
       const saved = await response.promise;
       state.documents = [saved];
       return saved;
@@ -676,7 +888,7 @@ test('document selection, uploading, failure retry, and received status follow s
   upload.props.onPress(); upload.props.onPress();
   assert.equal(writes, 1);
   assert.ok(button('Uploading document…').props.loading);
-  assert.ok(!content().includes('Received: '));
+  assert.ok(!content().includes('Upload confirmed: '));
   response.reject(new ApiRequestError(500, undefined, 'NETWORK_ERROR'));
   await new Promise(setImmediate);
   assert.ok(content().includes('The upload could not be confirmed.'));
@@ -696,7 +908,40 @@ test('document selection, uploading, failure retry, and received status follow s
   response.resolve(document('confirmed'));
   await new Promise(setImmediate);
   assert.ok(content().includes('confirmed.pdf'));
+  assert.ok(content().includes('Upload confirmed: '));
   assert.ok(content().includes('Received · awaiting staff review'));
   assert.equal(button('Upload document').props.disabled, true);
+  state.documents = [
+    { ...document('accepted'), status: 'accepted', reviewedAt: '2026-11-03T10:00:00Z' },
+    { ...document('rejected'), docType: 'birth_certificate', status: 'rejected', reviewNotes: 'Upload a clearer copy.', canReplace: true },
+  ];
+  assert.ok(content().includes('Accepted'));
+  assert.ok(content().includes('Rejected · correction needed'));
+  assert.ok(content().includes('Upload a clearer copy.'));
+  state.t = (_en, bs) => bs;
+  assert.ok(content().includes('Gidawat'));
+  assert.ok(content().includes('Gisalikway · kinahanglan tul-iron'));
+  assert.ok(content().includes('Upload a clearer copy.'));
+  state.t = en => en;
+  button('Upload corrected document').props.onPress();
+  assert.ok(content().includes('Correcting: '));
+  assert.ok(button('Cancel correction'));
+  selection = { canceled: false, assets: [{ ...selected, name: 'Correction.pdf' }] };
+  button('Choose document').props.onPress();
+  await new Promise(setImmediate);
+  response = deferred();
+  button('Upload document').props.onPress();
+  assert.equal(sent.replacesDocumentId, 'rejected');
+  assert.equal(sent.docType, 'birth_certificate');
+  response.reject(new ApiRequestError(500, undefined, 'NETWORK_ERROR'));
+  await new Promise(setImmediate);
+  assert.ok(content().includes('Correction.pdf'));
+  assert.ok(button('Cancel correction'));
+  response = deferred();
+  button('Upload document').props.onPress();
+  response.resolve({ ...document('corrected'), replacesDocumentId: 'rejected' });
+  await new Promise(setImmediate);
+  assert.ok(!button('Cancel correction'));
+  assert.ok(content().includes('corrected.pdf'));
   cleanup();
 });

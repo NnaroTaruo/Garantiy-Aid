@@ -2,7 +2,7 @@
 
 React Native + Expo beneficiary frontend built from Ronan's Figma mobile designs.
 
-The [shared-backend integration guide](docs/shared-backend-integration.md) covers registration/OTP/session/profile access through the staff backend. This phase is implemented and tested locally, with a portable backend patch for teammate review. Other features still need shared endpoints; the default setup below continues to use the original mobile backend.
+The [shared-backend integration guide](docs/shared-backend-integration.md) covers registration/OTP/sessions/profiles, document intake/review/corrections, and assigned program/enrollment/schedule information through the staff backend. These are implemented and tested locally, with ordered patches for teammate review. Home and Enrollment status include refresh actions, staff feedback, and honest loading/error/empty states. Shared QR, wallet/claims, notifications, real SMS and biometrics remain pending. The default setup below uses the original mobile backend.
 
 ## Run in the browser
 
@@ -46,7 +46,7 @@ Skip optional face enrollment or choose demo capture. Camera access is requested
 - Database-backed read-only claim status, assistance-ledger balance, transaction history, and receipt details. The ledger records distributed assistance and does not transfer or hold funds.
 - Saved profile details and enrollment status from the backend. **Edit profile** saves names, address, and barangay, preserves entered values on failure, and shows confirmation after success. Mobile number, birth date, sex, and account status stay read-only.
 - Database-backed notification inbox, message details, unread badge, and persistent read state with retry on failure. Notification delivery preferences and password/recovery screens remain previews.
-- **Enrollment documents** selects and uploads PDF/JPEG/PNG files up to 5 MB, shows upload activity, retains a failed selection for retry, and lists saved file metadata and received status. Files are private to the signed-in account; staff review remains separate.
+- **Enrollment documents** selects PDF/JPEG/PNG up to 5 MB, shows upload activity, and retains failed selections. The original backend saves received records. The shared backend also displays staff acceptance/rejection, notes and review time, and lets beneficiaries submit corrected files with version history. Files stay private to their owner.
 - Sample assistant conversations for schedule, documents, face scan failure, and enrollment; the claim-status answer reads saved claim data, while staff support remains a preview.
 - Schedule update and expired-QR states.
 

@@ -1,5 +1,30 @@
 # Frontend verification
 
+GitHub update prepared on November 5, 2026:
+
+- Rechecked all 37 mobile regressions and the mobile TypeScript check: all pass. The November 4 database, build and browser checks below describe the same application changes; they were not rerun for this publication step.
+- The update includes shared document review/corrections, existing-account login recovery, assigned enrollment/schedule views, their tests, documentation, and ordered backend patches. Private environments, uploaded files, database files, and temporary tools remain excluded. The pre-existing API whitespace edit is left outside the commit.
+- Publishing this mobile repository does not merge or deploy changes to the team's separate staff backend. Physical-device testing and the remaining shared mobile features are still pending.
+
+Shared enrollment/schedule milestone checked on November 4, 2026:
+
+- Added the authenticated own-account overview to the shared backend, reusing its existing program, enrollment, allocation, session and schedule tables. No migration or runtime dependency was added. All three ordered backend patches apply cleanly to the reviewed upstream base and reproduce all 26 changed files.
+- All 37 mobile regressions and TypeScript pass. The real TypeScript-client/HTTP/database suite passes staff submission, review/correction/resubmission/approval, draft scheduling, rescheduling and publication, earliest assignment selection, owner isolation, safe DTOs, nullable grants, session-local Manila dates/venues, filtering ineligible/expired/cancelled assignments, and logout. Backend authentication and document integration suites also pass. These checks ran on a separate migrated test instance at 51244.
+- The shared backend default suite reports 321 passed, eight skipped, and zero failed. Web and Android exports pass after the final UI change; Android export checks compilation rather than an installed app.
+- A temporary headless Chrome context checked Home, Schedule and Enrollment status with controlled API fixtures. Screenshots at 390px and 320px, including Bisaya enrollment feedback, show no horizontal overflow or browser errors. The first pass found a narrow long-name layout; allowing the status to wrap fixed it in the confirmation pass. These fixture screenshots are not a manual staff scheduling or physical-device result.
+- Home and empty enrollment screens now offer refresh actions. Older same-account responses cannot replace newer refresh results or clear their loading/error state. Enrollment shows staff feedback/review time and Not specified for null grants. Saved staff text is displayed without inventing translations.
+- The user confirmed the preceding local document upload -> staff rejection -> corrected upload -> staff acceptance -> mobile status flow. The browser development database was restarted after it refused connections; the existing beneficiary, two document records and enabled staff authenticator were preserved. No synthetic fixtures remain there. A complete manual staff program/scheduling walkthrough and physical Android validation remain pending.
+- This milestone is local and preserved in `integrations/shared-backend/mobile-overview.patch`; it has not been committed, pushed or deployed. Shared mobile QR issuance, wallet/claims, notifications, real SMS, biometric matching and a general program catalog remain pending.
+
+Shared document-review milestone checked on November 3, 2026:
+
+- Committed the preceding authentication milestone as `c45b049` (mobile repo) and `ce3ddc5` (shared backend), leaving the pre-existing API whitespace edit untouched. No GitHub push was performed.
+- Applied `20261103000100_allow_beneficiary_document_uploads` on the separate shared development instance at port 51234. Staff uploads retain attribution; a database check restricts beneficiary uploader IDs to the document owner.
+- All 35 mobile regressions and TypeScript pass, including the verified-account signup-to-login fallback, unfinished registration verification, and duplicate-code prevention. Web/Android exports passed for the document milestone before this login-flow fix. The shared backend default suite reports 321 passed, eight skipped, and zero failed. All three explicit HTTP/database suites pass: backend authentication, backend documents, and the actual mobile API client; the mobile client integration was rerun after the login-flow fix.
+- Verified mobile multipart upload -> authorized staff rejection -> mobile feedback -> corrected upload -> staff acceptance -> mobile status. Checks include UTF-8 filenames, temporary-file cleanup, size/type validation, spoofed input, binary downloads, account isolation, concurrent retries/corrections, and revocation while a streamed upload is in progress. Accepting documents does not modify enrollment or staff identity verification.
+- UI checks use controlled hooks and EN/Bisaya strings; Android request construction uses controlled file objects. No adb executable is available on PATH, and browser automation reports that its browser access host is unavailable. Actual device file-provider behavior, touch/keyboard/layout review, and a complete staff-browser walkthrough remain pending.
+- The document changes are local and preserved in a second portable backend patch applied after the authentication patch. Staff frontend routes/roles are reused. File viewing, durable hosted storage, malware scanning, retention/deletion, and other shared mobile features remain outside this milestone.
+
 Shared-backend account milestone checked on October 30, 2026:
 
 - Implemented a local feature branch based on the team's backend `050c389`: separate beneficiary accounts, development OTP, hashed/revocable sessions, public active barangays, own-profile GET/PATCH, and audit attribution. Existing staff authentication remains separate.

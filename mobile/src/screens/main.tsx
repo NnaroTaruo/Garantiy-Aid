@@ -161,6 +161,11 @@ export function HomeScreen() {
           </Txt>
         </Card>
       )}
+      {!overviewError && (
+        <Button variant="outline" loading={overviewLoading} onPress={() => void refreshOverview()}>
+          {t('Refresh schedule', 'I-refresh ang iskedyul')}
+        </Button>
+      )}
       {!faceEnrolled && (
         <Pressable accessibilityRole="button" onPress={() => flow('consent')}>
           <Notice tone="warning">

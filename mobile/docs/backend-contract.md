@@ -2,9 +2,13 @@
 
 These are the mobile frontend's requirements, derived from the manuscript and latest ERD. The first beneficiary-account endpoints now live in `../../backend`; the remaining rows describe later milestones.
 
-The original local API below remains available. The new [shared staff-backend integration](shared-backend-integration.md) implements the registration/OTP/session/profile contract under `/api/v1/mobile` in the teammate's backend checkout. Other routes below are not yet implemented there. Its schema, sessions, migrations, and data must not be mixed with the original local backend.
+The original local API below remains available. The [shared staff-backend integration](shared-backend-integration.md) implements registration/OTP/sessions/profiles, document intake/review/corrections, and `GET /beneficiaries/me/overview` under `/api/v1/mobile` in the teammate's backend checkout. QR, wallet/claims, and notifications still need shared mobile endpoints. Keep its schema, sessions, migrations, and data separate from the original local backend.
 
-## Implemented mobile API
+Shared documents use multipart `documentType` and `file`, unlike the original raw-byte protocol below. Their public DTO adds `reviewNotes`, `reviewedAt`, `replacesDocumentId`, and `canReplace`. Staff SUBMITTED/ACCEPTED/REJECTED/SUPERSEDED map to mobile received/accepted/rejected/superseded. `POST /beneficiaries/me/documents/:documentId/replacement` corrects an owned rejected document with the same category. There is no beneficiary review endpoint. Document acceptance does not approve enrollment or identity.
+
+The shared overview preserves the mobile contract, adding optional `reviewNotes` and `reviewedAt` to enrollments and allowing null program grant amounts. It returns only the signed-in account's enrollments and earliest eligible published schedule. The assigned slot supplies its Manila date/time and venue. Draft/closed/cancelled events, inactive programs, unapproved/cancelled/claimed allocations, closed slots, missed/cancelled schedules, and expired slots do not produce an upcoming schedule. FULL slots remain visible to their assigned beneficiary. The API is read-only and does not approve eligibility or create assignments.
+
+## Implemented original mobile API
 
 | Endpoint | Mobile use |
 | --- | --- |

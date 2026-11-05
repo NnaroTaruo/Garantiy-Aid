@@ -573,7 +573,7 @@ function AccountAddress() {
 export function EntryFlow() {
   const { step } = useLocalSearchParams<{ step: string }>();
   if (step === 'mobile-number' || step === 'login')
-    return <PhoneEntry login={step === 'login'} />;
+    return <PhoneEntry key={step} login={step === 'login'} />;
   if (step === 'account-info') return <AccountSetup />;
   if (step === 'account-address') return <AccountAddress />;
   if (step === 'otp') return <OTP />;
@@ -593,7 +593,9 @@ function PhoneEntry({ login }: { login: boolean }) {
   const [value, setValue] = useState(phone);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const sendingCode = useRef(false);
   const send = async () => {
+    if (sendingCode.current) return;
     if (!/^9\d{9}$/.test(value)) {
       setError(
         t(
@@ -603,10 +605,12 @@ function PhoneEntry({ login }: { login: boolean }) {
       );
       return;
     }
+    sendingCode.current = true;
     setLoading(true);
     setError('');
     try {
       let developmentOtp: string | undefined;
+      let purpose: 'login' | 'register' = login ? 'login' : 'register';
       if (login) {
         developmentOtp = (await requestOtp(value, 'login')).developmentOtp;
       } else {
@@ -635,7 +639,13 @@ function PhoneEntry({ login }: { login: boolean }) {
           ).developmentOtp;
         } catch (requestError) {
           if (requestError instanceof ApiRequestError && requestError.code === 'PHONE_ALREADY_REGISTERED') {
-            developmentOtp = (await requestOtp(value, 'register')).developmentOtp;
+            try {
+              developmentOtp = (await requestOtp(value, 'register')).developmentOtp;
+            } catch (verificationError) {
+              if (!(verificationError instanceof ApiRequestError) || verificationError.code !== 'ACCOUNT_ALREADY_VERIFIED') throw verificationError;
+              purpose = 'login';
+              developmentOtp = (await requestOtp(value, purpose)).developmentOtp;
+            }
           } else {
             throw requestError;
           }
@@ -643,7 +653,7 @@ function PhoneEntry({ login }: { login: boolean }) {
       }
       setPhone(value);
       flow('otp', {
-        intent: login ? 'login' : 'register',
+        intent: purpose,
         ...(developmentOtp ? { developmentOtp } : {}),
       });
     } catch (requestError) {
@@ -653,6 +663,7 @@ function PhoneEntry({ login }: { login: boolean }) {
           : t('Could not send a code. Try again.', 'Wala maipadala ang code. Sulayi pag-usab.'),
       );
     } finally {
+      sendingCode.current = false;
       setLoading(false);
     }
   };

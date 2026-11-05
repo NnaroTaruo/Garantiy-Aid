@@ -1,0 +1,123 @@
+diff --git a/docs/mobile-overview-integration.md b/docs/mobile-overview-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e896ffc5a201c4cf775b3ac5808dc3160e397067
+--- /dev/null
++++ b/docs/mobile-overview-integration.md
+@@ -0,0 +1,24 @@
++# Beneficiary program enrollment and assigned schedule
++
++Phase 3 adds `GET /api/v1/mobile/beneficiaries/me/overview` after the authentication and document patches. It uses the existing beneficiary mobile session and tables; no migration or dependencies are added.
++
++The response is `{ success: true, data: { enrollments, nextSchedule } }`, with `Cache-Control: private, no-store`. The authenticated account determines ownership; supplied beneficiary IDs do not change the account being read. Staff JWTs cannot authenticate to this route.
++
++Each enrollment contains `id`, `enrollmentDate` (YYYY-MM-DD), lowercase `status`, `reviewNotes`, nullable ISO `reviewedAt`, and `program`. Program fields are `id`, `code`, `name`, `type`, `description`, and numeric or null `grantAmount`. A missing grant stays null. All saved enrollment statuses are returned, including correction requests, rejection, suspension, and withdrawal. Staff IDs, other beneficiaries, eligibility snapshots, program budgets, and internal criteria are excluded.
++
++`nextSchedule` is null until staff publish an eligible assignment. Otherwise it contains `id`, `distributionId`, `title`, `date`, `slotStart`, `slotEnd`, `queueNumber`, `status`, `location`, and `program`. It selects the earliest unexpired SCHEDULED/CHECKED_IN assignment in an OPEN distribution with an ACTIVE program and an ALLOCATED allocation linked to an APPROVED enrollment. Closed slots are hidden; FULL slots remain visible to their assigned beneficiary. Dates and times come from the assigned session in Asia/Manila, and the venue comes from that slot, including sessions on another day or at another venue. Cancelled/missed schedules, cancelled/claimed allocations, inactive programs, and draft/closed/cancelled distributions are hidden.
++
++The endpoint is read-only. It does not approve enrollment, assign a program, generate or change slots, publish an event, verify identity, issue QR credentials, release a claim, or credit a wallet. Existing staff permissions and independent enrollment review remain in effect. Mobile currently views its own assigned programs; a general program catalog is separate work.
++
++## Verify
++
++From the mobile repository, run `npm.cmd run test:shared` with `DATABASE_URL` set to a separate migrated test PostgreSQL instance and the local shared backend configured for development mobile authentication. The test exercises the actual mobile TypeScript client and HTTP API: staff submission, review/correction/resubmission/approval, draft scheduling, rescheduling, publication, earliest selection, account isolation, hidden ineligible records, local session dates/venues, nullable amounts, private DTOs, and logout. It also checks the preceding account/profile/document workflow and removes its synthetic fixtures. Keep embedded Prisma tests separate from the browser instance.
++
++## Manual browser check
++
++1. Sign in on mobile and refresh Home and Profile > Enrollment status. An unassigned account shows empty states.
++2. An authorized administrator/facilitator submits that beneficiary to an active program using the staff web. A different authorized reviewer starts review and requests corrections or approves it. Refresh mobile status to see the decision, exact feedback, and review time.
++3. Authorized staff prepare a draft distribution, its sessions and allocations, then assign or reschedule the approved beneficiary while the event is still draft. The mobile schedule stays empty during preparation.
++4. Staff open the distribution after its readiness checks pass. Tap Refresh schedule on mobile; check the session's date, time, venue and queue number against the staff record.
++
++QR issuance, wallet/claims, shared notifications, real SMS and biometric matching are later mobile integration work. API/build checks and controlled browser screenshots do not replace a physical Android walkthrough or this complete manual staff scheduling test.
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index 98142a7424262bb1b534d2be7d3544dd935cdca7..bd84dafc716e924f0656feb70315556d17edd384 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -5,6 +5,7 @@ import { validateBody, validateParams } from "../../middleware/validate.js";
+ import { uploadBeneficiaryDocument } from "../documents/beneficiaryDocument.upload.js";
+ import { beneficiaryDocumentParamsSchema } from "../documents/beneficiaryDocument.schemas.js";
+ import { downloadMobileDocument, listMobileDocuments, uploadMobileDocument } from "./mobileDocuments.controller.js";
++import { getMobileOverview } from "./mobileOverview.service.js";
+ import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
+ import { mobileOtpRequestSchema, mobileOtpVerificationSchema, mobileProfileSchema, mobileRegistrationSchema } from "./mobile.schemas.js";
+ import { authenticateMobile, logoutMobile, mobileProfile, registerMobile, requestMobileOtp, updateMobileProfile, verifyMobileOtp } from "./mobile.service.js";
+@@ -36,6 +37,9 @@ mobileRoutes.use(asyncHandler(async (req, _res, next) => {
+ mobileRoutes.get("/beneficiaries/me", (req, res) => {
+   res.json({ success: true, data: mobileProfile(req.mobileSession.account) });
+ });
++mobileRoutes.get("/beneficiaries/me/overview", asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileOverview(req.mobileSession) });
++}));
+ mobileRoutes.get("/beneficiaries/me/documents", listMobileDocuments);
+ mobileRoutes.post("/beneficiaries/me/documents", uploadBeneficiaryDocument, uploadMobileDocument);
+ mobileRoutes.post("/beneficiaries/me/documents/:documentId/replacement", validateParams(beneficiaryDocumentParamsSchema.pick({ documentId: true })), uploadBeneficiaryDocument, uploadMobileDocument);
+diff --git a/src/modules/mobile/mobileOverview.service.js b/src/modules/mobile/mobileOverview.service.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..e993f89bcc77b7c4ce068eb6b628ee139bfc7bf6
+--- /dev/null
++++ b/src/modules/mobile/mobileOverview.service.js
+@@ -0,0 +1,65 @@
++import prisma from "../../lib/prisma.js";
++import { distributionSlotToResponse } from "../distributions/distributionSlot.service.js";
++
++const programSelect = {
++  programId: true, programCode: true, programName: true, programType: true,
++  description: true, grantAmount: true,
++};
++
++function mobileProgram(program) {
++  return {
++    id: program.programId, code: program.programCode, name: program.programName,
++    type: program.programType, description: program.description,
++    grantAmount: program.grantAmount === null ? null : Number(program.grantAmount),
++  };
++}
++
++export async function getMobileOverview(session) {
++  const beneficiaryId = session.account.beneficiaryId;
++  const [enrollments, schedule] = await Promise.all([
++    prisma.enrollment.findMany({
++      where: { beneficiaryId },
++      select: {
++        enrollmentId: true, enrollmentDate: true, status: true,
++        reviewNotes: true, reviewedAt: true, program: { select: programSelect },
++      },
++      orderBy: [{ enrollmentDate: "desc" }, { enrollmentId: "asc" }],
++    }),
++    prisma.schedule.findFirst({
++      where: {
++        beneficiaryId, status: { in: ["SCHEDULED", "CHECKED_IN"] },
++        slot: { slotEnd: { gt: new Date() }, slotStatus: { not: "CLOSED" } },
++        distribution: {
++          status: "OPEN", program: { status: "ACTIVE" },
++          allocations: { some: {
++            beneficiaryId, allocationStatus: "ALLOCATED", enrollment: { status: "APPROVED" },
++          } },
++        },
++      },
++      select: {
++        scheduleId: true, distributionId: true, queueNumber: true, status: true,
++        slot: { select: { slotStart: true, slotEnd: true, location: true } },
++        distribution: { select: { title: true, program: { select: programSelect } } },
++      },
++      orderBy: [{ slot: { slotStart: "asc" } }, { scheduleId: "asc" }],
++    }),
++  ]);
++  const slot = schedule ? distributionSlotToResponse(schedule.slot) : null;
++  return {
++    enrollments: enrollments.map(enrollment => ({
++      id: enrollment.enrollmentId,
++      enrollmentDate: enrollment.enrollmentDate.toISOString().slice(0, 10),
++      status: enrollment.status.toLowerCase(),
++      reviewNotes: enrollment.reviewNotes,
++      reviewedAt: enrollment.reviewedAt?.toISOString() ?? null,
++      program: mobileProgram(enrollment.program),
++    })),
++    nextSchedule: schedule ? {
++      id: schedule.scheduleId, distributionId: schedule.distributionId,
++      title: schedule.distribution.title, date: slot.slotStart.slice(0, 10),
++      slotStart: slot.slotStart, slotEnd: slot.slotEnd,
++      queueNumber: schedule.queueNumber, status: schedule.status.toLowerCase(),
++      location: schedule.slot.location, program: mobileProgram(schedule.distribution.program),
++    } : null,
++  };
++}

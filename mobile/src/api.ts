@@ -20,9 +20,10 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = 10_000):
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const multipart = typeof FormData !== 'undefined' && init?.body instanceof FormData;
     const response = await fetch(`${API_URL}${path}`, {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...init?.headers },
+      headers: { ...(!multipart ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
       signal: controller.signal,
     });
     const body = response.status === 204 ? null : await response.json();
@@ -73,7 +74,7 @@ export type Beneficiary = {
 export type ProfileUpdate = Pick<Beneficiary, 'firstName' | 'middleName' | 'lastName' | 'address' | 'barangayId'>;
 
 export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
-export type DocumentType = 'proof_of_residency' | 'valid_id' | 'other';
+export type DocumentType = 'proof_of_residency' | 'valid_id' | 'other' | 'birth_certificate' | 'barangay_certificate' | 'medical_certificate' | 'pwd_id' | 'senior_citizen_id';
 export type BeneficiaryDocument = {
   id: string;
   docType: DocumentType;
@@ -82,19 +83,25 @@ export type BeneficiaryDocument = {
   sizeBytes: number;
   status: string;
   createdAt: string;
+  reviewNotes?: string | null;
+  reviewedAt?: string | null;
+  replacesDocumentId?: string | null;
+  canReplace?: boolean;
 };
 
 export type ProgramEnrollment = {
   id: string;
   enrollmentDate: string;
   status: string;
+  reviewNotes?: string | null;
+  reviewedAt?: string | null;
   program: {
     id: string;
     code: string;
     name: string;
     type: string;
     description: string | null;
-    grantAmount: number;
+    grantAmount: number | null;
   };
 };
 
@@ -112,7 +119,7 @@ export type ClaimingSchedule = {
     id: string;
     code: string;
     name: string;
-    grantAmount: number;
+    grantAmount: number | null;
   };
 };
 
@@ -334,7 +341,9 @@ export async function getDocuments(accessToken: string) {
   })).data;
 }
 
-export async function uploadDocument(accessToken: string, asset: DocumentPickerAsset, docType: DocumentType) {
+export async function uploadDocument(accessToken: string, asset: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string) {
+  const sharedBackend = API_URL.endsWith('/api/v1/mobile');
+  if (replacesDocumentId && !sharedBackend) throw new ApiRequestError('DOCUMENT_REPLACEMENT_UNAVAILABLE', 'Document corrections require the shared backend.');
   const extension = /\.([a-z0-9]+)$/i.exec(asset.name)?.[1].toLowerCase();
   const mimeType = ({ pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png' } as Record<string, string>)[extension ?? ''];
   if (!mimeType) throw new ApiRequestError('UNSUPPORTED_FILE_TYPE', 'Choose a PDF, JPEG, or PNG file.');
@@ -352,6 +361,16 @@ export async function uploadDocument(accessToken: string, asset: DocumentPickerA
   } catch (error) {
     if (error instanceof ApiRequestError) throw error;
     throw new ApiRequestError('FILE_UNREADABLE', 'Choose the file again; it could not be read.');
+  }
+  if (sharedBackend) {
+    const body = new FormData();
+    body.append('documentType', docType.toUpperCase());
+    if (Platform.OS === 'web') body.append('file', new Blob([contents], { type: mimeType }), asset.name);
+    else body.append('file', { uri: asset.uri, name: asset.name, type: mimeType } as unknown as Blob);
+    const suffix = replacesDocumentId ? `/${encodeURIComponent(replacesDocumentId)}/replacement` : '';
+    return (await request<{ data: BeneficiaryDocument }>(`/beneficiaries/me/documents${suffix}`, {
+      method: 'POST', body, headers: { Authorization: `Bearer ${accessToken}` },
+    }, 60_000)).data;
   }
   return (await request<{ data: BeneficiaryDocument }>('/beneficiaries/me/documents', {
     method: 'POST', body: contents,
