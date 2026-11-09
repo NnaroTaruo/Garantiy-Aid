@@ -114,6 +114,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const documentRequest = useRef(0);
   const overviewRequest = useRef(0);
   const walletRequest = useRef(0);
+  const notificationRequest = useRef(0);
   const reset = async () => {
     sessionVersion.current += 1;
     setPhone('');
@@ -206,11 +207,12 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   };
   const loadNotifications = async (token: string, version: number) => {
     if (!token || version !== sessionVersion.current) return;
+    const request = ++notificationRequest.current;
     setNotificationsLoading(true);
     setNotificationsError(false);
     try {
       const nextNotifications = await getNotifications(token);
-      if (version === sessionVersion.current) {
+      if (version === sessionVersion.current && request === notificationRequest.current) {
         // A refresh started before a successful read must not make it unread again.
         setNotifications((previous) => {
           const readTimes = new Map(previous.map((notice) => [notice.id, notice.readAt]));
@@ -218,11 +220,11 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         });
       }
     } catch (error) {
-      if (version !== sessionVersion.current) return;
+      if (version !== sessionVersion.current || request !== notificationRequest.current) return;
       if (error instanceof ApiRequestError && error.status === 401) await reset();
       else setNotificationsError(true);
     } finally {
-      if (version === sessionVersion.current) setNotificationsLoading(false);
+      if (version === sessionVersion.current && request === notificationRequest.current) setNotificationsLoading(false);
     }
   };
   const markRead = async (id: string) => {

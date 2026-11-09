@@ -70,6 +70,11 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     };
     const overview = () => api.getBeneficiaryOverview(login.accessToken);
     const records = () => api.getWalletOverview(login.accessToken);
+    const notices = () => api.getNotifications(login.accessToken);
+    assert.equal((await notices()).length, 0);
+    for (const token of [null, staffToken]) {
+      assert.equal((await fetch(`${base}/mobile/beneficiaries/me/notifications`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })).status, 401);
+    }
     for (const token of [null, staffToken]) {
       assert.equal((await fetch(`${base}/mobile/beneficiaries/me/wallet`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })).status, 401);
     }
@@ -112,6 +117,15 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     await staffRequest(`/enrollments/${enrollmentId}/start-review`, reviewerToken);
     await staffRequest(`/enrollments/${enrollmentId}/approve`, reviewerToken, { remarks: 'Approved for the synthetic schedule test.' });
     assert.equal((await overview()).enrollments[0].status, 'approved');
+    const approvalNotice = (await notices()).find(item => item.title === 'Enrollment approved');
+    assert.ok(approvalNotice);
+    assert.ok(approvalNotice.message.includes('Synthetic in-kind program'));
+    assert.ok(approvalNotice.messageBs.includes('Naaprubahan'));
+    assert.equal(approvalNotice.readAt, null);
+    assert.equal((await fetch(`${base}/mobile/beneficiaries/me/notifications/${approvalNotice.id}/read`, {
+      method: 'PATCH', headers: { Authorization: `Bearer ${staffToken}` },
+    })).status, 401);
+    assert.deepEqual(Object.keys(approvalNotice).sort(), ['id', 'message', 'messageBs', 'notificationType', 'readAt', 'scheduleId', 'sentAt', 'title', 'titleBs']);
     const otherPhone = `+639${randomInt(100_000_000, 1_000_000_000)}`;
     const other = await api.registerBeneficiary({ firstName: 'Other', middleName: '', lastName: 'Synthetic', birthDate: '1990-01-01', sex: 'female', address: 'Other sample address', barangayId, contactNumber: otherPhone });
     extraBeneficiaries.push(other.beneficiary.id);
@@ -130,9 +144,11 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     const assigned = await staffRequest(`/distributions/${distributionId}/schedules`, staffToken, { allocationId: allocation.allocationId, slotId: slots[0].slotId });
     const scheduleId = assigned.schedule.scheduleId;
     assert.equal((await overview()).nextSchedule, null); // Draft assignments are not published.
+    assert.equal((await notices()).filter(item => item.notificationType === 'schedule').length, 0);
     await unavailablePass();
     await staffRequest(`/distributions/${distributionId}/schedules/${scheduleId}/reschedule`, staffToken, { slotId: slots[1].slotId });
     await staffRequest(`/distributions/${distributionId}/open`, staffToken);
+    assert.equal((await notices()).filter(item => item.title === 'Claiming schedule available').length, 1);
     const upcoming = (await overview()).nextSchedule;
     assert.equal(upcoming.id, scheduleId);
     assert.equal(upcoming.location, slots[1].location);
@@ -300,11 +316,57 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     assert.equal(claimRecords.claims.find(item => item.id === physicalClaimId).status, 'verified');
     assert.equal(claimRecords.claims.find(item => item.id === physicalClaimId).releasedAt, null);
     assert.equal(claimRecords.claims.find(item => item.distributionId === anotherId).status, 'pending');
-    await staffRequest(`/distributions/${distributionId}/claims/${physicalClaimId}/release`, facilitatorToken, {
+    const releaseKey = randomUUID();
+    const releaseBody = {
       evidenceType: 'OTHER', evidenceReference: 'SYNTHETIC-RELEASE-001',
       notes: 'Synthetic API test only; no physical goods transferred.', beneficiaryAcknowledged: true, releasedQuantity: 1,
-    }, { 'Idempotency-Key': randomUUID() });
+    };
+    await staffRequest(`/distributions/${distributionId}/claims/${physicalClaimId}/release`, facilitatorToken, releaseBody, { 'Idempotency-Key': releaseKey });
+    await staffRequest(`/distributions/${distributionId}/claims/${physicalClaimId}/release`, facilitatorToken, releaseBody, { 'Idempotency-Key': releaseKey });
     await staffRequest(`/distributions/${distributionId}/claims/${physicalClaimId}/receipt`, facilitatorToken);
+    const releaseNotices = (await notices()).filter(item => item.title === 'Assistance release recorded');
+    assert.equal(releaseNotices.length, 1, 'Replayed release must not duplicate an in-app notification');
+    assert.equal((await notices()).filter(item => item.title === 'Claim identity verified').length, 1, 'Pending combined verification must not claim verification is complete');
+    assert.ok(!releaseNotices[0].message.includes('SYNTHETIC-RELEASE-001'), 'Private evidence must not enter messages');
+    const noticeId = releaseNotices[0].id;
+    const readResults = await Promise.all([api.markNotificationRead(login.accessToken, noticeId), api.markNotificationRead(login.accessToken, noticeId)]);
+    assert.equal(readResults[0].readAt, readResults[1].readAt);
+    assert.equal((await api.markNotificationRead(login.accessToken, noticeId)).readAt, readResults[0].readAt);
+    assert.equal((await notices()).find(item => item.id === noticeId).readAt, readResults[0].readAt);
+    assert.equal((await prisma.notification.findUnique({ where: { notificationId: noticeId } })).status, 'SENT');
+    await assert.rejects(api.markNotificationRead(otherLogin.accessToken, noticeId), error => error.status === 404);
+    await assert.rejects(api.markNotificationRead(login.accessToken, 'invalid-id'), error => error.status === 400);
+    const hiddenNotices = [];
+    for (const [channel, status, sentAt, recipient, linkedSchedule] of [
+      ['SMS', 'SENT', new Date(), beneficiaryId, null],
+      ['EMAIL', 'SENT', new Date(), beneficiaryId, null],
+      ['IN_APP', 'FAILED', new Date(), beneficiaryId, null],
+      ['IN_APP', 'PENDING', new Date(), beneficiaryId, null],
+      ['IN_APP', 'SENT', new Date(Date.now() + 86400000), beneficiaryId, null],
+      ['IN_APP', 'SENT', new Date(), other.beneficiary.id, null],
+      ['IN_APP', 'SENT', new Date(), other.beneficiary.id, scheduleId],
+    ]) hiddenNotices.push(await prisma.notification.create({ data: { beneficiaryId: recipient, scheduleId: linkedSchedule,
+      channel, status, sentAt, notificationType: 'OTHER', message: 'Synthetic private delivery record.', providerReference: randomUUID() } }));
+    const visibleIds = new Set((await notices()).map(item => item.id));
+    assert.ok(hiddenNotices.every(item => !visibleIds.has(item.notificationId)));
+    for (const hidden of hiddenNotices) await assert.rejects(api.markNotificationRead(login.accessToken, hidden.notificationId), error => error.status === 404);
+    const otherNotices = await api.getNotifications(otherLogin.accessToken);
+    assert.equal(otherNotices.length, 1, 'Cross-owner schedule links must not expose a notification');
+    const scopedInbox = await fetch(`${base}/mobile/beneficiaries/me/notifications?beneficiaryId=${other.beneficiary.id}`, { headers: { Authorization: `Bearer ${login.accessToken}` } });
+    assert.equal(scopedInbox.headers.get('cache-control'), 'private, no-store');
+    assert.ok((await scopedInbox.json()).data.some(item => item.id === noticeId));
+    // Age only this synthetic account's challenge to exercise login without waiting through the real resend cooldown.
+    await prisma.beneficiaryMobileOtp.updateMany({ where: { account: { beneficiaryId } }, data: { createdAt: new Date(Date.now() - 61_000) } });
+    const returningCode = await api.requestOtp(contactNumber, 'login');
+    const returning = await api.verifyOtp(contactNumber, 'login', returningCode.developmentOtp);
+    assert.equal((await api.getNotifications(returning.accessToken)).find(item => item.id === noticeId).readAt, readResults[0].readAt);
+    const { createMobileNotifications } = await load('src/modules/mobile/mobileNotifications.service.js');
+    const beforeRollback = await prisma.notification.count({ where: { beneficiaryId } });
+    await assert.rejects(prisma.$transaction(async tx => {
+      await createMobileNotifications(tx, [{ beneficiaryId, type: 'ENROLLMENT_REJECTED', reference: randomUUID() }]);
+      throw new Error('Synthetic transaction rollback');
+    }), /Synthetic transaction rollback/);
+    assert.equal(await prisma.notification.count({ where: { beneficiaryId } }), beforeRollback);
     claimRecords = await records();
     const released = claimRecords.claims.find(item => item.id === physicalClaimId);
     assert.equal(released.status, 'claimed');
@@ -331,13 +393,25 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
       await prisma.claim.update({ where: { claimId: physicalClaimId }, data: { claimStatus } });
       assert.equal((await records()).claims.find(item => item.id === physicalClaimId).status, claimStatus.toLowerCase());
     }
-    // Seed only synthetic ledger fixtures to exercise signed amounts and inconsistent ownership defenses.
+    // Seed a completed biometric prerequisite; this exercises simulated settlement, not live face matching.
     const ownWallet = await prisma.walletAccount.create({ data: { beneficiaryId, balance: 0, currency: 'PHP', accountStatus: 'ACTIVE' } });
     const otherWallet = await prisma.walletAccount.create({ data: { beneficiaryId: other.beneficiary.id, balance: 0, currency: 'PHP', accountStatus: 'ACTIVE' } });
     const ledgerClaimId = claimRecords.claims.find(item => item.distributionId === anotherId).id;
+    await prisma.claim.update({ where: { claimId: ledgerClaimId }, data: { claimStatus: 'VERIFIED', biometricVerified: true, isDuplicateFlag: false, verifiedAt: new Date() } });
+    const creditKey = randomUUID();
+    await staffRequest(`/distributions/${anotherId}/claims/${ledgerClaimId}/credit`, reviewerToken, {}, { 'Idempotency-Key': creditKey });
+    await staffRequest(`/distributions/${anotherId}/claims/${ledgerClaimId}/credit`, reviewerToken, {}, { 'Idempotency-Key': creditKey });
+    const credit = await prisma.transaction.findFirstOrThrow({ where: { claimId: ledgerClaimId, transactionType: 'BENEFIT_CREDIT' } });
+    const reversalKey = randomUUID();
+    const reversalPath = `/wallets/${ownWallet.walletId}/transactions/${credit.transactionId}/reverse`;
+    await staffRequest(reversalPath, reviewerToken, { reason: 'Synthetic notification test reversal.' }, { 'Idempotency-Key': reversalKey });
+    await staffRequest(reversalPath, reviewerToken, { reason: 'Synthetic notification test reversal.' }, { 'Idempotency-Key': reversalKey });
+    const ledgerNotices = await notices();
+    assert.equal(ledgerNotices.filter(item => item.title === 'Simulated benefit credit recorded').length, 1);
+    assert.equal(ledgerNotices.filter(item => item.title === 'Simulated benefit credit reversed').length, 1);
+    assert.ok(ledgerNotices.find(item => item.title === 'Simulated benefit credit recorded').message.includes('No real funds moved'));
+    // Inconsistent ownership and unrelated transfers are still excluded from the beneficiary ledger.
     for (const [transactionType, walletId, claimId] of [
-      ['BENEFIT_CREDIT', ownWallet.walletId, ledgerClaimId],
-      ['BENEFIT_REVERSAL', ownWallet.walletId, ledgerClaimId],
       ['BENEFIT_CREDIT', otherWallet.walletId, physicalClaimId],
       ['SIMULATED_TRANSFER_IN', ownWallet.walletId, null],
     ]) await prisma.transaction.create({ data: { beneficiaryId, walletId, claimId, amount: 1000,
@@ -354,6 +428,20 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     const scopedWallet = await fetch(`${base}/mobile/beneficiaries/me/wallet?beneficiaryId=${other.beneficiary.id}`, { headers: { Authorization: `Bearer ${login.accessToken}` } });
     assert.equal(scopedWallet.headers.get('cache-control'), 'private, no-store');
     assert.equal((await scopedWallet.json()).data.claims.length, 2);
+    const cancelledId = randomUUID();
+    distributionIds.push(cancelledId);
+    await prisma.distribution.create({ data: { distributionId: cancelledId, programId, createdById: userId,
+      title: 'Synthetic cancellation event', distributionDate: new Date(nextDay), startTime: new Date('1970-01-01T02:00:00Z'),
+      endTime: new Date('1970-01-01T03:00:00Z'), slotDurationMinutes: 30, location: 'Cancellation test venue', barangayId } });
+    await prisma.distributionAllocation.create({ data: { distributionId: cancelledId, beneficiaryId, enrollmentId, amount: 1000,
+      allocationStatus: 'ALLOCATED', allocatedById: userId, allocatedAt: new Date() } });
+    const cancelledSlot = await prisma.distributionSlot.create({ data: { distributionId: cancelledId, sessionId: randomUUID(),
+      sessionLabel: 'Cancellation session', location: 'Cancellation test venue', slotStart: new Date(`${nextDay}T02:00:00+08:00`),
+      slotEnd: new Date(`${nextDay}T02:30:00+08:00`), capacity: 1 } });
+    await staffRequest(`/distributions/${cancelledId}/schedules`, staffToken, { allocationId: (await prisma.distributionAllocation.findUnique({ where: { distributionId_beneficiaryId: { distributionId: cancelledId, beneficiaryId } } })).allocationId, slotId: cancelledSlot.slotId });
+    const noticesBeforeDraftCancellation = (await notices()).length;
+    await staffRequest(`/distributions/${cancelledId}/cancel`, staffToken);
+    assert.equal((await notices()).length, noticesBeforeDraftCancellation, 'Cancelling an unpublished draft must not announce a schedule');
     const staff = await fetch(`${base}/beneficiaries/${beneficiaryId}`, { headers: { Authorization: `Bearer ${staffToken}` } });
     assert.equal(staff.status, 200);
     assert.equal((await staff.json()).data.beneficiary.firstName, 'Updated');
@@ -385,12 +473,15 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     await assert.rejects(api.getCurrentBeneficiary(login.accessToken), (error) => error.status === 401);
     await assert.rejects(overview(), (error) => error.status === 401);
     await assert.rejects(records(), (error) => error.status === 401);
+    await assert.rejects(notices(), (error) => error.status === 401);
+    await assert.rejects(api.markNotificationRead(login.accessToken, approvalNotice.id), (error) => error.status === 401);
     await assert.rejects(api.issueClaimPass(login.accessToken), (error) => error.status === 401);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     const ownerIds = [beneficiaryId, ...extraBeneficiaries].filter(Boolean);
     const documents = await prisma.beneficiaryDocument.findMany({ where: { beneficiaryId: { in: ownerIds } }, select: { documentId: true } });
     const qrTokens = await prisma.qrToken.findMany({ where: { beneficiaryId: { in: ownerIds } }, select: { qrTokenId: true } });
+    await prisma.notification.deleteMany({ where: { beneficiaryId: { in: ownerIds } } });
     await prisma.auditLog.deleteMany({ where: { OR: [{ userId: { in: [userId, reviewerId, facilitatorId] } }, { recordId: { in: [...ownerIds, ...documents.map((item) => item.documentId), ...qrTokens.map((item) => item.qrTokenId)] } }] } });
     await prisma.idempotencyRecord.deleteMany({ where: { userId: { in: [userId, reviewerId, facilitatorId] } } });
     await prisma.qrScanLog.deleteMany({ where: { distributionId: { in: distributionIds } } });

@@ -1,0 +1,402 @@
+diff --git a/docs/mobile-notifications-integration.md b/docs/mobile-notifications-integration.md
+new file mode 100644
+index 0000000..20ba10f
+--- /dev/null
++++ b/docs/mobile-notifications-integration.md
+@@ -0,0 +1,24 @@
++# Mobile shared in-app notifications (phase 6)
++
++Apply `mobile-v4.patch`, `mobile-claims.patch`, then `mobile-notifications.patch` to backend `42b4552`. Run Prisma generate and migrate deploy against a separate development/test database first. The new migration only adds nullable `message_bs` and `read_at` columns to the existing notifications table. It does not reset data or alter staff SMS delivery state. No new dependency is required.
++
++## Routes
++
++- `GET /api/v1/mobile/beneficiaries/me/notifications` returns only the signed-in beneficiary's IN_APP messages, with SENT/READ status and a nonfuture sentAt. A linked schedule must belong to that beneficiary. The DTO is `id`, `scheduleId`, `title`, `titleBs`, `message`, `messageBs`, `notificationType`, `sentAt`, `readAt`; all timestamps are ISO UTC. No delivery internals, staff IDs, recipient details, provider references, QR secrets or evidence are returned. Titles and categories derive from controlled event types. Existing custom IN_APP messages use an Account update title and their saved text.
++- `PATCH /api/v1/mobile/beneficiaries/me/notifications/:notificationId/read` sets the first read time using an ownership/visibility-scoped conditional update, then returns `id` and `readAt`. Retried/concurrent reads preserve that time. Missing, foreign and invisible records return 404. Staff JWTs are rejected by beneficiary authentication. Both routes return private/no-store.
++
++## Automatic staff events
++
++In-app rows are inserted in the same database transaction as enrollment review/correction/approval/rejection, distribution publication, final QR/biometric/signature verification, physical release, and simulated benefit credit/reversal. Partial identity checks do not announce completion. Draft schedule edits and draft cancellation are unpublished and produce no alerts. The existing staff rules lock schedule edits and reject event cancellation after opening; this phase does not change those rules.
++
++Rows use controlled English/Bisaya messages and stable hashed event keys with ON CONFLICT skipping duplicates. Business rollback also removes the new alert. Verification/release/credit idempotency replays do not duplicate messages. Published assignments are inserted in a batch. No existing event is replayed/backfilled during migration. Staff notes, release evidence, biometric/signature data and raw QR values are never copied into message text. Simulated ledger notices explicitly state that no real funds moved.
++
++These rows use IN_APP/SENT and provider mode IN_APP. They do not enter the SMS queue or need Redis, a worker, Expo push or an SMS provider. Delivery preference switches remain previews. The mobile app refreshes on opening Notifications and offers manual refresh; background push/realtime delivery is separate work.
++
++## Verification
++
++From mobile, run `npm.cmd test`, `npm.cmd run typecheck` and `npm.cmd run test:shared` with DATABASE_URL pointing to the migrated isolated test instance. The actual client/API test covers staff-created updates, no draft alerts (including draft cancellation), final versus partial verification, release/credit/reversal replay, publication, owner and linked-schedule isolation, delivery-channel/status/time filtering, DTO allowlists, first-read races, a later login, invalid IDs, authentication/logout and transaction rollback. Settlement prerequisites are synthetic; live biometrics and real funds are not exercised.
++
++The backend's existing verification-time fixtures also check that combined methods announce verification only after completion and that replay/duplicate scans preserve one alert. Run backend `npm.cmd test` for regression checks.
++
++For manual testing, have authorized staff perform a new enrollment decision, publish a test assignment or release test assistance. In mobile, open Notifications and refresh, open a message and return to confirm its unread dot disappears, then sign out/in to confirm that read state remains saved. Existing pre-migration test releases do not create new alerts by themselves. No production or hosted backend has been changed by this local implementation.
+diff --git a/prisma/migrations/20261109000100_add_mobile_notification_reads/migration.sql b/prisma/migrations/20261109000100_add_mobile_notification_reads/migration.sql
+new file mode 100644
+index 0000000..5f21dc9
+--- /dev/null
++++ b/prisma/migrations/20261109000100_add_mobile_notification_reads/migration.sql
+@@ -0,0 +1,4 @@
++-- Preserve existing delivery records; mobile read state is independent of SMS delivery.
++ALTER TABLE "notifications"
++  ADD COLUMN "message_bs" TEXT,
++  ADD COLUMN "read_at" TIMESTAMPTZ(6);
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 607d27c..fc12c14 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -1080,6 +1080,8 @@ model Notification {
+   initiatedById       String?             @map("initiated_by") @db.Uuid
+   channel             NotificationChannel
+   message             String              @db.Text
++  messageBs           String?             @map("message_bs") @db.Text
++  readAt              DateTime?           @map("read_at") @db.Timestamptz(6)
+   notificationType    String              @map("notification_type") @db.VarChar(30)
+   status              NotificationStatus  @default(PENDING)
+   providerMode        String              @default("SIMULATED") @map("provider_mode") @db.VarChar(20)
+diff --git a/src/modules/biometrics/biometricClaim.controller.js b/src/modules/biometrics/biometricClaim.controller.js
+index c818ab0..79918f2 100644
+--- a/src/modules/biometrics/biometricClaim.controller.js
++++ b/src/modules/biometrics/biometricClaim.controller.js
+@@ -1,5 +1,6 @@
+ import { createHash } from "node:crypto";
+ import prisma from "../../lib/prisma.js";
++import { createMobileNotifications } from "../mobile/mobileNotifications.service.js";
+ import { env } from "../../config/env.js";
+ import { asyncHandler } from "../../utils/asyncHandler.js";
+ import { AppError } from "../../utils/AppError.js";
+@@ -467,6 +468,9 @@ export const verifyBiometricClaim = asyncHandler(async (req, res) => {
+       where: { biometricId: profile.biometricId },
+       data: { verificationCount: { increment: 1 }, lastVerifiedAt: new Date() },
+     });
++    if (completedVerification) await createMobileNotifications(tx, [{ beneficiaryId, distributionId,
++      scheduleId: claim.scheduleId, type: "CLAIM_VERIFIED", reference: claim.claimId,
++      label: currentDistribution.title }]);
+     const nextRequiredVerification = completedVerification
+       ? null
+       : currentDistribution.verificationRequirement === "BIOMETRIC_AND_SIGNATURE" ? "SIGNATURE" : "QR";
+@@ -615,6 +619,8 @@ export const submitClaimSignature = asyncHandler(async (req, res) => {
+       data: { claimStatus: "VERIFIED", signatureVerified: true, verifiedById: req.auth.userId, verifiedAt: signature.signedAt },
+       select: claimMutationSelect,
+     });
++    await createMobileNotifications(tx, [{ beneficiaryId: claim.beneficiaryId, distributionId,
++      scheduleId: claim.scheduleId, type: "CLAIM_VERIFIED", reference: claimId }]);
+     await tx.auditLog.create({
+       data: {
+         userId: req.auth.userId,
+diff --git a/src/modules/distributions/distributionClaim.controller.js b/src/modules/distributions/distributionClaim.controller.js
+index 50b9022..1032690 100644
+--- a/src/modules/distributions/distributionClaim.controller.js
++++ b/src/modules/distributions/distributionClaim.controller.js
+@@ -1,5 +1,6 @@
+ import { createHash, randomUUID } from "node:crypto";
+ import prisma from "../../lib/prisma.js";
++import { createMobileNotifications } from "../mobile/mobileNotifications.service.js";
+ import { env } from "../../config/env.js";
+ import { asyncHandler } from "../../utils/asyncHandler.js";
+ import { AppError } from "../../utils/AppError.js";
+@@ -145,6 +146,7 @@ function failureBody(req, code, message, details) {
+ 
+ async function createScanAttempt(tx, req, {
+   distributionId,
++  beneficiaryId,
+   submittedTokenHash,
+   qrTokenId = null,
+   claimId = null,
+@@ -163,6 +165,10 @@ async function createScanAttempt(tx, req, {
+     },
+     select: { scanLogId: true },
+   });
++  if (scanResult === "VERIFIED" && claimId) {
++    await createMobileNotifications(tx, [{ beneficiaryId,
++      distributionId, type: "CLAIM_VERIFIED", reference: claimId }]);
++  }
+   await tx.auditLog.create({
+     data: {
+       userId: req.auth.userId,
+@@ -800,6 +806,7 @@ export const verifyQrClaim = asyncHandler(async (req, res) => {
+             qrTokenId: qrToken.qrTokenId,
+             claimId: completedClaim.claimId,
+             scanResult: "VERIFIED",
++            beneficiaryId: qrToken.beneficiaryId,
+             deviceInfo,
+           });
+           await tx.auditLog.create({
+@@ -925,6 +932,7 @@ export const verifyQrClaim = asyncHandler(async (req, res) => {
+           qrTokenId: qrToken.qrTokenId,
+           claimId: createdClaim.claimId,
+           scanResult: verificationComplete ? "VERIFIED" : "PENDING_BIOMETRIC",
++          beneficiaryId: qrToken.beneficiaryId,
+           deviceInfo,
+         });
+         await tx.auditLog.create({
+diff --git a/src/modules/distributions/distributionClaimRelease.controller.js b/src/modules/distributions/distributionClaimRelease.controller.js
+index 4feb18e..a87bf15 100644
+--- a/src/modules/distributions/distributionClaimRelease.controller.js
++++ b/src/modules/distributions/distributionClaimRelease.controller.js
+@@ -1,4 +1,5 @@
+ import prisma from "../../lib/prisma.js";
++import { createMobileNotifications } from "../mobile/mobileNotifications.service.js";
+ import { asyncHandler } from "../../utils/asyncHandler.js";
+ import { AppError } from "../../utils/AppError.js";
+ import { clientIpAddress } from "../../utils/clientIp.js";
+@@ -179,6 +180,9 @@ export const markPhysicalClaimReleased = asyncHandler(async (req, res) => {
+         },
+       });
+ 
++      await createMobileNotifications(tx, [{ beneficiaryId: releasedClaim.beneficiaryId,
++        type: "ASSISTANCE_RELEASED", reference: claimId, distributionId, scheduleId: releasedClaim.scheduleId,
++        label: currentDistribution.title }]);
+       const responseBody = releaseResponse(releasedClaim);
+       await saveIdempotencyRecord({
+         identity,
+diff --git a/src/modules/distributions/distributionSchedule.controller.js b/src/modules/distributions/distributionSchedule.controller.js
+index 422a273..192baf5 100644
+--- a/src/modules/distributions/distributionSchedule.controller.js
++++ b/src/modules/distributions/distributionSchedule.controller.js
+@@ -1,5 +1,6 @@
+ import { randomUUID } from "node:crypto";
+ import prisma from "../../lib/prisma.js";
++import { createMobileNotifications } from "../mobile/mobileNotifications.service.js";
+ import { env } from "../../config/env.js";
+ import { asyncHandler } from "../../utils/asyncHandler.js";
+ import { AppError } from "../../utils/AppError.js";
+@@ -750,6 +751,13 @@ export const openDistribution = asyncHandler(async (req, res) => {
+     assertDistributionSchedulesManageable(distribution);
+     assertPhysicalPackageReady(distribution);
+     const readiness = await distributionOpeningReadiness(distributionId, tx);
++    const assignments = await tx.schedule.findMany({ where: { distributionId, status: "SCHEDULED" },
++      select: { scheduleId: true, beneficiaryId: true } });
++    await createMobileNotifications(tx, assignments.map(schedule => ({
++      beneficiaryId: schedule.beneficiaryId, scheduleId: schedule.scheduleId, distributionId,
++      type: "SCHEDULE_PUBLISHED", reference: `${distributionId}:${schedule.scheduleId}`,
++      label: distribution.title,
++    })));
+     const transition = await tx.distribution.updateMany({
+       where: { distributionId, status: "DRAFT" },
+       data: { status: "OPEN" },
+diff --git a/src/modules/distributions/distributionSchedule.service.js b/src/modules/distributions/distributionSchedule.service.js
+index b4ed7f9..d669811 100644
+--- a/src/modules/distributions/distributionSchedule.service.js
++++ b/src/modules/distributions/distributionSchedule.service.js
+@@ -74,6 +74,7 @@ export const schedulableAllocationSelect = {
+ };
+ 
+ export const distributionScheduleParentSelect = {
++  title: true,
+   deliveryMode: true,
+   packageQuantity: true,
+   distributionId: true,
+diff --git a/src/modules/enrollments/enrollment.controller.js b/src/modules/enrollments/enrollment.controller.js
+index 9205b56..635d6f4 100644
+--- a/src/modules/enrollments/enrollment.controller.js
++++ b/src/modules/enrollments/enrollment.controller.js
+@@ -1,4 +1,5 @@
+ import prisma from "../../lib/prisma.js";
++import { createMobileNotifications } from "../mobile/mobileNotifications.service.js";
+ import { asyncHandler } from "../../utils/asyncHandler.js";
+ import { AppError } from "../../utils/AppError.js";
+ import { clientIpAddress } from "../../utils/clientIp.js";
+@@ -225,6 +226,9 @@ async function reviewEnrollment(req, res, {
+       },
+     });
+ 
++    await createMobileNotifications(tx, [{ beneficiaryId: existingEnrollment.beneficiaryId,
++      type: `ENROLLMENT_${nextStatus}`, reference: `${existingEnrollment.enrollmentId}:${existingEnrollment.updatedAt.toISOString()}`,
++      label: existingEnrollment.program.programName }]);
+     return existingEnrollment.enrollmentId;
+   });
+ 
+@@ -340,6 +344,9 @@ export const approveEnrollment = asyncHandler(async (req, res) => {
+       },
+     });
+ 
++    await createMobileNotifications(tx, [{ beneficiaryId: existingEnrollment.beneficiaryId,
++      type: "ENROLLMENT_APPROVED", reference: `${existingEnrollment.enrollmentId}:${existingEnrollment.updatedAt.toISOString()}`,
++      label: existingEnrollment.program.programName }]);
+     return existingEnrollment.enrollmentId;
+   });
+ 
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index e83a99e..6f3a5a2 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -8,6 +8,8 @@ import { downloadMobileDocument, listMobileDocuments, uploadMobileDocument } fro
+ import { getMobileOverview } from "./mobileOverview.service.js";
+ import { issueMobileClaimPass } from "./mobileClaimPass.service.js";
+ import { getMobileWallet } from "./mobileWallet.service.js";
++import { getMobileNotifications, readMobileNotification } from "./mobileNotifications.service.js";
++import { mobileNotificationParamsSchema } from "./mobile.schemas.js";
+ import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
+ import { mobileOtpRequestSchema, mobileOtpVerificationSchema, mobileProfileSchema, mobileRegistrationSchema } from "./mobile.schemas.js";
+ import { authenticateMobile, logoutMobile, mobileProfile, registerMobile, requestMobileOtp, updateMobileProfile, verifyMobileOtp } from "./mobile.service.js";
+@@ -45,6 +47,12 @@ mobileRoutes.get("/beneficiaries/me/overview", asyncHandler(async (req, res) =>
+ mobileRoutes.get("/beneficiaries/me/wallet", asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileWallet(req.mobileSession) });
+ }));
++mobileRoutes.get("/beneficiaries/me/notifications", asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileNotifications(req.mobileSession) });
++}));
++mobileRoutes.patch("/beneficiaries/me/notifications/:notificationId/read", validateParams(mobileNotificationParamsSchema), asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await readMobileNotification(req.mobileSession, req.validatedParams.notificationId) });
++}));
+ mobileRoutes.post("/beneficiaries/me/claim-pass", mobileAuthenticationRateLimiter, asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await issueMobileClaimPass(req.mobileSession) });
+ }));
+diff --git a/src/modules/mobile/mobile.schemas.js b/src/modules/mobile/mobile.schemas.js
+index 4e7f155..f0ade67 100644
+--- a/src/modules/mobile/mobile.schemas.js
++++ b/src/modules/mobile/mobile.schemas.js
+@@ -27,6 +27,7 @@ export const mobileRegistrationSchema = createBeneficiarySchema.pick({ birthDate
+ }).strict();
+ 
+ export const mobileOtpRequestSchema = z.object({ contactNumber, purpose }).strict();
++export const mobileNotificationParamsSchema = z.object({ notificationId: z.uuid() }).strict();
+ export const mobileOtpVerificationSchema = mobileOtpRequestSchema.extend({ code: z.string().regex(/^\d{6}$/) }).strict();
+ export const mobileProfileSchema = z.object({ firstName: name, middleName, lastName: name, address, barangayId })
+   .partial().strict().refine((value) => Object.keys(value).length > 0, "Supply a name, address, or barangay change.");
+diff --git a/src/modules/mobile/mobileNotifications.service.js b/src/modules/mobile/mobileNotifications.service.js
+new file mode 100644
+index 0000000..0decda0
+--- /dev/null
++++ b/src/modules/mobile/mobileNotifications.service.js
+@@ -0,0 +1,59 @@
++import { createHash } from "node:crypto";
++import prisma from "../../lib/prisma.js";
++import { AppError } from "../../utils/AppError.js";
++
++// Titles and generated messages are controlled here; staff notes and identity evidence are never copied.
++const events = {
++  ENROLLMENT_FOR_VALIDATION: ["account", "Enrollment under review", "Gisusi ang enrollment", "Staff are reviewing your enrollment. Open Enrollment status for details.", "Gisusi sa staff ang imong enrollment. Ablihi ang Kahimtang sa enrollment alang sa detalye."],
++  ENROLLMENT_NEEDS_CORRECTION: ["account", "Enrollment needs correction", "Kinahanglang tul-iron ang enrollment", "Staff requested a correction. Open Enrollment status and Enrollment documents for details.", "Naghangyo ang staff og pagtul-id. Ablihi ang Kahimtang sa enrollment ug Mga dokumento sa enrollment."],
++  ENROLLMENT_APPROVED: ["account", "Enrollment approved", "Naaprubahan ang enrollment", "Your enrollment was approved. Staff will assign a claiming schedule separately.", "Naaprubahan ang imong enrollment. Ang staff maoy mo-assign sa iskedyul sa pag-claim."],
++  ENROLLMENT_REJECTED: ["account", "Enrollment not approved", "Wala maaprubahan ang enrollment", "Your enrollment was not approved. Open Enrollment status for staff feedback.", "Wala maaprubahan ang imong enrollment. Ablihi ang Kahimtang sa enrollment alang sa tubag sa staff."],
++  SCHEDULE_PUBLISHED: ["schedule", "Claiming schedule available", "Anaa na ang iskedyul sa pag-claim", "Your claiming schedule is available. Open Home and refresh your schedule to check the date, time, venue and queue number.", "Anaa na ang imong iskedyul sa pag-claim. Ablihi ang Home ug i-refresh ang iskedyul aron makita ang petsa, oras, lugar ug numero sa pila."],
++  CLAIM_VERIFIED: ["claim", "Claim identity verified", "Napamatud-an ang identidad sa claim", "Staff completed your claim verification. Release is recorded separately. Check Wallet for the current status.", "Nakompleto sa staff ang pag-verify sa imong claim. Gilain og rekord ang paghatag sa ayuda. Susihon ang Wallet alang sa kasamtangang kahimtang."],
++  ASSISTANCE_RELEASED: ["claim", "Assistance release recorded", "Narekord ang paghatag sa ayuda", "Staff recorded a physical assistance handover. Open Wallet to check the package, release time and available receipt number.", "Girekord sa staff ang paghatag sa pisikal nga ayuda. Ablihi ang Wallet aron makita ang pakete, oras sa paghatag ug anaa nga numero sa resibo."],
++  BENEFIT_CREDITED_SIMULATED: ["claim", "Simulated benefit credit recorded", "Narekord ang simulated benefit credit", "A prototype benefit credit was recorded. No real funds moved. Open Wallet for the ledger entry.", "Narekord ang prototype benefit credit. Walay tinuod nga kuwarta nga gibalhin. Ablihi ang Wallet alang sa rekord."],
++  BENEFIT_REVERSED_SIMULATED: ["claim", "Simulated benefit credit reversed", "Gibali ang simulated benefit credit", "Staff reversed a prototype benefit credit. No real funds moved. Open Wallet for the updated ledger.", "Gibali sa staff ang prototype benefit credit. Walay tinuod nga kuwarta nga gibalhin. Ablihi ang Wallet alang sa bag-ong rekord."],
++};
++
++export async function createMobileNotifications(database, notifications) {
++  if (!notifications.length) return;
++  const sentAt = new Date();
++  await database.notification.createMany({ data: notifications.map(({ beneficiaryId, type, reference, label = "", scheduleId = null, distributionId = null }) => {
++    const event = events[type];
++    if (!event) throw new Error("Unsupported mobile notification event");
++    const prefix = label ? `${label}: ` : "";
++    return { beneficiaryId, scheduleId, distributionId, channel: "IN_APP", status: "SENT",
++      providerMode: "IN_APP", simulated: false, sentAt, notificationType: type,
++      message: prefix + event[3], messageBs: prefix + event[4],
++      deduplicationKey: createHash("sha256").update(`mobile-in-app:${type}:${reference}`).digest("hex"),
++    };
++  }), skipDuplicates: true });
++}
++
++function visibleWhere(session, now = new Date()) {
++  const beneficiaryId = session.account.beneficiaryId;
++  return { beneficiaryId, channel: "IN_APP", status: { in: ["SENT", "READ"] }, sentAt: { lte: now },
++    OR: [{ scheduleId: null }, { schedule: { beneficiaryId } }] };
++}
++
++export async function getMobileNotifications(session) {
++  // ponytail: own-account prototype inbox is unpaginated; add cursors before a large pilot.
++  const rows = await prisma.notification.findMany({ where: visibleWhere(session),
++    select: { notificationId: true, scheduleId: true, notificationType: true, message: true, messageBs: true, sentAt: true, readAt: true },
++    orderBy: [{ sentAt: "desc" }, { notificationId: "desc" }] });
++  return rows.map(row => {
++    const event = events[row.notificationType];
++    return { id: row.notificationId, scheduleId: row.scheduleId,
++      title: event?.[1] ?? "Account update", titleBs: event?.[2] ?? "Update sa account",
++      message: row.message, messageBs: row.messageBs, notificationType: event?.[0] ?? "account",
++      sentAt: row.sentAt.toISOString(), readAt: row.readAt?.toISOString() ?? null };
++  });
++}
++
++export async function readMobileNotification(session, notificationId) {
++  const where = { ...visibleWhere(session), notificationId };
++  await prisma.notification.updateMany({ where: { ...where, readAt: null }, data: { readAt: new Date() } });
++  const row = await prisma.notification.findFirst({ where, select: { notificationId: true, readAt: true } });
++  if (!row) throw new AppError(404, "NOTIFICATION_NOT_FOUND", "Notification not found.");
++  return { id: row.notificationId, readAt: row.readAt.toISOString() };
++}
+diff --git a/src/modules/wallets/wallet.controller.js b/src/modules/wallets/wallet.controller.js
+index 4105319..e9dbee0 100644
+--- a/src/modules/wallets/wallet.controller.js
++++ b/src/modules/wallets/wallet.controller.js
+@@ -1,6 +1,7 @@
+ import { distributionReconciliation } from "../distributions/distributionReconciliation.service.js";
+ import { randomUUID } from "node:crypto";
+ import prisma from "../../lib/prisma.js";
++import { createMobileNotifications } from "../mobile/mobileNotifications.service.js";
+ import { env } from "../../config/env.js";
+ import { asyncHandler } from "../../utils/asyncHandler.js";
+ import { AppError } from "../../utils/AppError.js";
+@@ -457,6 +458,9 @@ export const creditVerifiedClaim = asyncHandler(async (req, res) => {
+       select: transactionMutationSelect,
+     });
+ 
++    await createMobileNotifications(tx, [{ beneficiaryId: claim.beneficiaryId, distributionId,
++      scheduleId: claim.scheduleId, type: "BENEFIT_CREDITED_SIMULATED", reference: transaction.transactionId }]);
++
+     await tx.auditLog.create({
+       data: {
+         userId: req.auth.userId,
+@@ -794,6 +798,8 @@ export const reverseBenefitCredit = asyncHandler(async (req, res) => {
+       },
+       select: transactionMutationSelect,
+     });
++    await createMobileNotifications(tx, [{ beneficiaryId: original.beneficiaryId,
++      distributionId: original.distributionId, type: "BENEFIT_REVERSED_SIMULATED", reference: reversal.transactionId }]);
+     const reversedOriginal = await tx.transaction.update({
+       where: { transactionId: original.transactionId },
+       data: { status: "REVERSED" },
+diff --git a/test/claim-verification-time.test.js b/test/claim-verification-time.test.js
+index 51f5c87..d9e1f66 100644
+--- a/test/claim-verification-time.test.js
++++ b/test/claim-verification-time.test.js
+@@ -30,6 +30,7 @@ const profile = {
+ };
+ 
+ function fixture(requirement, existing = null) {
++  const notifications = [];
+   let claim = existing && { claimId: randomUUID(), beneficiaryId, distributionId, beneficiary: { firstName: 'Maria', lastName: 'Santos' }, ...existing };
+   let recordedRequest;
+   const token = { qrTokenId: randomUUID(), beneficiaryId, distributionId, qrStatus: 'ACTIVE', expiresAt: new Date('2100-01-01') };
+@@ -47,12 +48,16 @@ function fixture(requirement, existing = null) {
+     biometricVerificationAttempt: { create: async () => ({ attemptId: randomUUID() }) },
+     claimSignature: { create: async ({ data }) => ({ ...data, signatureId: randomUUID(), signedAt: new Date() }) },
+     auditLog: { create: async () => ({}) },
++    notification: { createMany: async ({ data }) => {
++      for (const row of data) if (!notifications.some(item => item.deduplicationKey === row.deduplicationKey)) notifications.push(row);
++      return { count: data.length };
++    } },
+     idempotencyRecord: { deleteMany: async () => ({}), findUnique: async ({ where }) => {
+       const identity = where.userId_operation_idempotencyKey;
+       return recordedRequest && ['userId', 'operation', 'idempotencyKey'].every(key => recordedRequest[key] === identity[key]) ? recordedRequest : null;
+     }, create: async ({ data }) => { recordedRequest = data; return data; } },
+   });
+-  return { claim: () => claim, newRequest: () => { recordedRequest = null; } };
++  return { claim: () => claim, notifications, newRequest: () => { recordedRequest = null; } };
+ }
+ 
+ function invoke(handler, extra = {}, key = randomUUID()) {
+@@ -127,6 +132,7 @@ test('QR-only completion records a stable time across replay and a later duplica
+   state.newRequest();
+   assert.equal((await invoke(verifyQrClaim)).status, 409);
+   assert.equal(state.claim().verifiedAt.toISOString(), verifiedAt);
++  assert.equal(state.notifications.length, 1, 'Replay and duplicate scans must not duplicate the notice');
+ });
+ 
+ test('combined QR and face verification records time only when the second check completes, in either order', async () => {
+@@ -136,11 +142,13 @@ test('combined QR and face verification records time only when the second check
+     assert.equal((await (first === 'QR' ? invoke(verifyQrClaim) : face())).status, 201);
+     assert.equal(state.claim().claimStatus, 'PENDING');
+     assert.equal(state.claim().verifiedAt, null);
++    assert.equal(state.notifications.length, 0, 'Pending combined checks must not send a verified notice');
+     state.newRequest();
+     const before = Date.now();
+     assert.equal((await (first === 'QR' ? face() : invoke(verifyQrClaim))).status, 201);
+     assert.equal(state.claim().claimStatus, 'VERIFIED');
+     assert.ok(state.claim().verifiedAt.getTime() >= before);
++    assert.equal(state.notifications.length, 1);
+   }
+ });
+ 

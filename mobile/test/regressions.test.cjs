@@ -349,6 +349,25 @@ test('logout cancels an unfinished session restoration', async () => {
   assert.equal(render().authLoading, false);
 });
 
+test('the latest notification refresh wins over stale success, failure and unauthorized responses', async () => {
+  for (const outcome of ['success', 'failure', 'unauthorized']) {
+    const older = deferred(), newer = deferred();
+    let loads = 0;
+    const render = provider({ getNotifications: () => ++loads === 1 ? [] : loads === 2 ? older.promise : newer.promise });
+    await render().startSession('owner', beneficiary('owner'));
+    const oldRequest = render().refreshNotifications(), newRequest = render().refreshNotifications();
+    newer.resolve([{ id: 'current', readAt: null }]);
+    await newRequest;
+    if (outcome === 'success') older.resolve([{ id: 'outdated', readAt: null }]);
+    else older.reject(outcome === 'unauthorized' ? new ApiRequestError(401) : new Error('Old request failed'));
+    await oldRequest;
+    assert.equal(render().notifications[0].id, 'current');
+    assert.equal(render().accessToken, 'owner');
+    assert.equal(render().notificationsError, false);
+    assert.equal(render().notificationsLoading, false);
+  }
+});
+
 test('notification reads require server success and survive an older refresh response', async () => {
   const waiting = deferred();
   let reads = 0, loads = 0;
