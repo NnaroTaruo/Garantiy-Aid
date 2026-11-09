@@ -18,6 +18,10 @@ All three routes require a beneficiary mobile session: GET `/beneficiaries/me/bi
 
 Only staff capture and enroll faces. Mobile consent alone never creates a profile; renewing consent never restores a revoked one. SIMULATED records remain clearly labeled. This replaces the earlier client-only consent/camera preview; the original mobile API below has no biometric endpoints.
 
+## Shared staff-support requests (phase 9)
+
+GET `/beneficiaries/me/support?page=1&pageSize=20` returns `{ data: { requests, pagination } }`. POST on the same path takes `{ requestId, language: 'en' | 'bs', messageText }`. GET `/beneficiaries/me/support/:requestId` returns `{ data: { request, messages } }`; POST `/:requestId/messages` takes `{ messageId, messageText }` and returns the saved thread. IDs are UUID retry identifiers, not credentials. Request metadata includes status, dates, resolution, retention and canReply. Messages include only id, role, text and createdAt. The signed-in mobile session supplies ownership, and the source marker excludes anonymous chatbot conversations. Staff replies/resolution use the existing scoped staff endpoints. Replays return the saved thread; altered IDs/content, closed requests and concurrent changes may return 409. Foreign/expired-retention requests return 404. No external AI, push, attachments or automatic translation is added; refresh loads updates. See [support setup](support-setup.md).
+
 ## Implemented original mobile API
 
 Phase 7 keeps the existing registration/code-request/verification endpoints. Optional SMS mode uses a private Semaphore key and never returns a development code or raw gateway response. Challenge creation commits before sending, delivery must be accepted before verification, and failed sends invalidate that challenge. OTP/session mode binding rejects development credentials in SMS mode. Registration and code-request clients allow 20 seconds for delivery/database work. Recover account uses the existing login purpose; it does not reset a password, change a number or link a staff record. The adapter is prepared but unactivated because the team has no provider account. See [SMS setup](sms-setup.md).

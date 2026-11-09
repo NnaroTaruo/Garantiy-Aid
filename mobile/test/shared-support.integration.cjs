@@ -1,0 +1,103 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const ts = require('typescript');
+const { randomUUID, randomInt } = require('node:crypto');
+const { once } = require('node:events');
+const { pathToFileURL } = require('node:url');
+
+test('mobile support reaches the scoped staff queue, saves replies and resolution, isolates owners and safely replays retries', async () => {
+  const shared = path.resolve(__dirname, '../../shared-backend');
+  require(path.join(shared, 'node_modules/dotenv')).config({ path: path.join(shared, '.env'), quiet: true });
+  assert.equal(new URL(process.env.DATABASE_URL).port, '51244', 'Use isolated PostgreSQL 51244.');
+  process.env.AUTH_RATE_LIMIT_PER_15_MINUTES = '100'; process.env.CHATBOT_RATE_LIMIT_PER_15_MINUTES = '200';
+  const load = file => import(pathToFileURL(path.join(shared, file)).href);
+  const [{ default: app }, { default: prisma }, { signAccessToken }] = await Promise.all([load('src/app.js'), load('src/lib/prisma.js'), load('src/modules/auth/auth.service.js')]);
+  const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}/api/v1`, api = {}, people = [], staff = [], areas = [];
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/api.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+    { exports: api, require: () => ({ Platform: { OS: 'web' } }), process: { env: { EXPO_PUBLIC_API_URL: base + '/mobile' } }, fetch, AbortController, setTimeout, clearTimeout });
+  const request = (url, token, body, method = 'POST') => fetch(base + url, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  try {
+    for (const name of ['First', 'Other']) {
+      const barangayId = randomUUID(), userId = randomUUID(), sessionId = randomUUID(); areas.push(barangayId); staff.push({ id: userId });
+      await prisma.barangay.create({ data: { barangayId, barangayCode: barangayId.slice(0, 20), barangayName: 'Synthetic support ' + name, city: 'Test', province: 'Test' } });
+      await prisma.user.create({ data: { userId, employeeId: userId.slice(0, 20), username: 'test_' + userId.replaceAll('-', '').slice(0, 16), fullName: 'Synthetic support facilitator',
+        email: `${userId}@example.invalid`, passwordHash: 'not-a-login-password', role: 'BARANGAY_FACILITATOR', barangayId } });
+      await prisma.staffSession.create({ data: { sessionId, userId, expiresAt: new Date(Date.now() + 300000) } });
+      staff.at(-1).token = signAccessToken({ userId, role: 'BARANGAY_FACILITATOR' }, { jwtId: sessionId });
+      const contactNumber = `+639${randomInt(100_000_000, 1_000_000_000)}`;
+      const registered = await api.registerBeneficiary({ firstName: name, middleName: '', lastName: 'Synthetic', birthDate: '1990-01-01', sex: 'female', address: 'Synthetic support address', barangayId, contactNumber });
+      people.push({ id: registered.beneficiary.id });
+      people.at(-1).token = (await api.verifyOtp(contactNumber, 'register', registered.developmentOtp)).accessToken;
+    }
+    const [owner, other] = people, [facilitator, outsider] = staff;
+    assert.equal((await api.getSupportRequests(owner.token)).requests.length, 0);
+    const input = { requestId: randomUUID(), language: 'en', messageText: 'Please review my enrollment. otp: 123456' };
+    for (const token of ['', facilitator.token]) assert.equal((await request('/mobile/beneficiaries/me/support', token, null, 'GET')).status, 401);
+    assert.equal((await request('/mobile/beneficiaries/me/support', owner.token, { ...input, beneficiaryId: other.id })).status, 400);
+    assert.equal((await request('/mobile/beneficiaries/me/support', owner.token, { ...input, messageText: '<script>alert(1)</script>' })).status, 400);
+    const simultaneous = await Promise.allSettled([api.createSupportRequest(owner.token, input), api.createSupportRequest(owner.token, input)]);
+    assert.ok(simultaneous.some(result => result.status === 'fulfilled'));
+    for (const result of simultaneous) if (result.status === 'rejected') assert.equal(result.reason.status, 409);
+    let saved = await api.createSupportRequest(owner.token, input);
+    assert.equal(saved.request.id, input.requestId); assert.equal(saved.request.status, 'escalated'); assert.equal(saved.request.canReply, true);
+    assert.equal(saved.messages.length, 1); assert.equal(saved.messages[0].role, 'user'); assert.ok(saved.messages[0].text.includes('[REDACTED_CREDENTIAL]'));
+    assert.ok(!JSON.stringify(saved).includes('123456'));
+    assert.equal(await prisma.chatbotSession.count({ where: { sessionId: input.requestId } }), 1);
+    assert.equal((await prisma.chatbotSession.findUnique({ where: { sessionId: input.requestId } })).accessTokenHash, null);
+    const queueResponse = await request('/chatbot/escalations', facilitator.token, null, 'GET'); assert.equal(queueResponse.status, 200);
+    const queue = (await queueResponse.json()).data.escalations;
+    assert.ok(queue.some(item => item.sessionId === input.requestId && item.beneficiary.beneficiaryId === owner.id));
+    assert.equal((await request(`/chatbot/escalations/${input.requestId}`, outsider.token, null, 'GET')).status, 403);
+    assert.equal((await request(`/chatbot/escalations/${input.requestId}`, owner.token, null, 'GET')).status, 401);
+    const generic = await fetch(`${base}/chatbot/sessions/${input.requestId}`, { headers: { 'X-Chatbot-Session-Token': 'A'.repeat(43) } });
+    assert.equal(generic.status, 404, 'Anonymous chatbot tokens cannot access a mobile support thread');
+    await assert.rejects(api.getSupportRequest(other.token, input.requestId), error => error.status === 404);
+    await assert.rejects(api.createSupportRequest(other.token, input), error => error.status === 409);
+    assert.equal((await api.getSupportRequests(other.token)).requests.length, 0);
+    assert.equal((await request(`/chatbot/escalations/${input.requestId}/reply`, facilitator.token, { messageText: 'Synthetic staff reply: your concern is being reviewed.' })).status, 201);
+    saved = await api.getSupportRequest(owner.token, input.requestId);
+    assert.equal(saved.messages.at(-1).role, 'staff'); assert.ok(saved.messages.at(-1).text.includes('being reviewed'));
+    assert.ok(!JSON.stringify(saved).match(/staffUser|employeeId|accessToken|beneficiaryId|confidenceScore|intentDetected/));
+    const reply = { messageId: randomUUID(), messageText: 'Thank you. This is a synthetic follow-up.' };
+    assert.equal((await request(`/mobile/beneficiaries/me/support/${input.requestId}/messages`, owner.token, { ...reply, senderType: 'STAFF' })).status, 400);
+    await assert.rejects(api.replySupportRequest(other.token, input.requestId, reply), error => error.status === 404);
+    await api.replySupportRequest(owner.token, input.requestId, reply); await api.replySupportRequest(owner.token, input.requestId, reply);
+    assert.equal((await api.getSupportRequest(owner.token, input.requestId)).messages.length, 3);
+    await assert.rejects(api.replySupportRequest(owner.token, input.requestId, { ...reply, messageText: 'Changed replay' }), error => error.status === 409);
+    assert.equal((await request(`/chatbot/escalations/${input.requestId}/resolve`, facilitator.token, { resolutionCode: 'ANSWERED' })).status, 200);
+    saved = await api.getSupportRequest(owner.token, input.requestId);
+    assert.equal(saved.request.status, 'resolved'); assert.equal(saved.request.canReply, false); assert.ok(saved.request.resolvedAt);
+    assert.equal((await api.createSupportRequest(owner.token, input)).request.status, 'resolved', 'A lost success response must not create another request');
+    await api.replySupportRequest(owner.token, input.requestId, reply);
+    await assert.rejects(api.replySupportRequest(owner.token, input.requestId, { messageId: randomUUID(), messageText: 'New message after resolution' }), error => error.status === 409);
+    const next = await api.createSupportRequest(owner.token, { requestId: randomUUID(), language: 'bs', messageText: 'Kinahanglan ko og tabang sa iskedyul.' });
+    assert.equal(next.request.language, 'bs');
+    assert.equal((await prisma.chatbotSession.findUnique({ where: { sessionId: next.request.id } })).language, 'ceb');
+    const pageOne = await request('/mobile/beneficiaries/me/support?page=1&pageSize=1', owner.token, null, 'GET');
+    assert.equal(pageOne.headers.get('cache-control'), 'private, no-store');
+    assert.equal((await pageOne.json()).data.pagination.totalPages, 2);
+    await prisma.chatbotSession.update({ where: { sessionId: next.request.id }, data: { startedAt: new Date(Date.now() - 30 * 86400000) } });
+    assert.equal((await api.getSupportRequest(owner.token, next.request.id)).request.canReply, false);
+    await prisma.chatbotSession.update({ where: { sessionId: next.request.id }, data: { createdAt: new Date(Date.now() - 30 * 86400000), retentionUntil: new Date(Date.now() - 1000) } });
+    await assert.rejects(api.getSupportRequest(owner.token, next.request.id), error => error.status === 404);
+    assert.equal((await api.getSupportRequests(owner.token)).requests.length, 1);
+    const audits = await prisma.auditLog.findMany({ where: { recordId: input.requestId } });
+    assert.ok(audits.length >= 4); assert.ok(!JSON.stringify(audits).includes('Please review my enrollment'));
+    await api.logout(owner.token);
+    await assert.rejects(api.getSupportRequests(owner.token), error => error.status === 401);
+    await assert.rejects(api.createSupportRequest(owner.token, { ...input, requestId: randomUUID() }), error => error.status === 401);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    const ids = people.map(person => person.id), userIds = staff.map(person => person.id);
+    const sessions = await prisma.chatbotSession.findMany({ where: { beneficiaryId: { in: ids } }, select: { sessionId: true } });
+    await prisma.auditLog.deleteMany({ where: { OR: [{ recordId: { in: [...ids, ...sessions.map(s => s.sessionId)] } }, { userId: { in: userIds } }] } });
+    await prisma.chatbotSession.deleteMany({ where: { beneficiaryId: { in: ids } } });
+    await prisma.beneficiary.deleteMany({ where: { beneficiaryId: { in: ids } } });
+    await prisma.user.deleteMany({ where: { userId: { in: userIds } } });
+    await prisma.barangay.deleteMany({ where: { barangayId: { in: areas } } }); await prisma.$disconnect();
+  }
+});

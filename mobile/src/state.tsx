@@ -440,7 +440,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         notificationsError,
         refreshNotifications: () => loadNotifications(accessToken, renderedSessionVersion),
         markRead,
-        reset,
+        reset: async () => { if (renderedSessionVersion === sessionVersion.current) await reset(); },
         t: (en, bs) => (language === 'en' ? en : bs),
       }}
     >

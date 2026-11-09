@@ -25,6 +25,8 @@ Phase 7 connects Recover account to the existing login-code verification flow an
 
 Phase 8 saves mobile biometric consent, displays facilitator enrollment status and supports confirmed withdrawal in Security & Privacy. The facilitator captures the face through the existing staff workflow. The local processor is SIMULATED and the app labels its records accordingly. Apply `mobile-biometrics.patch` after the SMS patch and deploy its additive migration. See the [biometrics guide](mobile/docs/biometrics-setup.md). Real model/device validation and upstream deployment remain pending.
 
+Phase 9 connects Help > Talk to staff to the existing staff escalation queue. Beneficiaries can save concerns, reopen requests, send follow-ups and refresh for staff replies/resolution. Ownership, retries and barangay staff scope are enforced; no external AI or delivery service is needed. Apply `mobile-support.patch` after the biometric patch. It adds no migration or dependency. See [support setup](mobile/docs/support-setup.md). Updates currently use manual refresh.
+
 Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. These READMEs describe the later milestones.
 
 If the PDF preview does not open, use the [direct PDF download](https://raw.githubusercontent.com/NnaroTaruo/Garantiy-Aid/main/output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf).

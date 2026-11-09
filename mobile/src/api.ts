@@ -82,6 +82,26 @@ export type BiometricOverview = {
 };
 export type BiometricConsentInput = { consentVersion: string; retentionUntil: string; expectedConsentId: string | null };
 
+export type SupportRequest = { id: string; language: string; status: string; createdAt: string; updatedAt: string;
+  resolvedAt: string | null; resolutionCode: string | null; retentionUntil: string; canReply: boolean };
+export type SupportList = { requests: (SupportRequest & { subject: string })[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number } };
+export type SupportThread = { request: SupportRequest; messages: { id: string; role: 'user' | 'staff' | 'assistant'; text: string; createdAt: string }[] };
+export async function getSupportRequests(accessToken: string, page = 1) {
+  return (await request<{ data: SupportList }>(`/beneficiaries/me/support?page=${page}`, { headers: { Authorization: `Bearer ${accessToken}` } })).data;
+}
+export async function getSupportRequest(accessToken: string, id: string) {
+  return (await request<{ data: SupportThread }>(`/beneficiaries/me/support/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${accessToken}` } })).data;
+}
+export async function createSupportRequest(accessToken: string, input: { requestId: string; language: string; messageText: string }) {
+  return (await request<{ data: SupportThread }>('/beneficiaries/me/support', { method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` }, body: JSON.stringify(input) })).data;
+}
+export async function replySupportRequest(accessToken: string, id: string, input: { messageId: string; messageText: string }) {
+  return (await request<{ data: SupportThread }>(`/beneficiaries/me/support/${encodeURIComponent(id)}/messages`, { method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` }, body: JSON.stringify(input) })).data;
+}
+
 export async function getBiometrics(accessToken: string) {
   return (await request<{ data: BiometricOverview }>('/beneficiaries/me/biometrics', {
     headers: { Authorization: `Bearer ${accessToken}` },

@@ -29,7 +29,7 @@ const greeting: Message = {
   bs: 'Kumusta! Ako ang assistant sa GarantiyAid. Makatabang ko sa imong iskedyul, dad-on, ug kahimtang sa claim. Unsay gusto nimong mahibal-an?',
 };
 export function HelpScreen() {
-  const { t, overview, wallet, walletLoading, walletError } = useDemo();
+  const { t, overview, overviewLoading, overviewError, wallet, walletError } = useDemo();
   const [messages, setMessages] = useState<Message[]>([greeting]);
   const [input, setInput] = useState('');
   const scroll = useRef<ScrollView>(null);
@@ -85,7 +85,7 @@ export function HelpScreen() {
           bs: 'Temporaryong dili makita ang natipig nga kahimtang sa claim. Ablihi ang Wallet ug sulayi pag-load pag-usab.',
         };
       }
-      if (walletLoading && !wallet) {
+      if (!wallet) {
         return {
           en: 'Your saved claim status is still loading. Please ask again in a moment.',
           bs: 'Nag-load pa ang natipig nga kahimtang sa claim. Pangutana pag-usab sa makadiyot.',
@@ -137,7 +137,13 @@ export function HelpScreen() {
     })();
     const answers: Record<string, { en: string; bs: string }> = {
       status: statusAnswer,
-      schedule: overview?.nextSchedule
+      schedule: overviewError ? {
+        en: 'Your saved schedule is temporarily unavailable. Open Home and refresh your schedule.',
+        bs: 'Temporaryong dili makita ang natipig nga iskedyul. Ablihi ang Home ug i-refresh ang iskedyul.',
+      } : overviewLoading || !overview ? {
+        en: 'Your saved schedule is still loading. Please ask again in a moment.',
+        bs: 'Nag-load pa ang natipig nga iskedyul. Pangutana pag-usab sa makadiyot.',
+      } : overview.nextSchedule
         ? {
             en: `Your next claiming schedule is ${formatDate(overview.nextSchedule.date)} from ${formatTimeSlot(overview.nextSchedule.slotStart, overview.nextSchedule.slotEnd)} at ${overview.nextSchedule.location}. Your queue number is ${formatQueueNumber(overview.nextSchedule.queueNumber)}.`,
             bs: `Ang imong sunod nga iskedyul kay ${formatDate(overview.nextSchedule.date)}, ${formatTimeSlot(overview.nextSchedule.slotStart, overview.nextSchedule.slotEnd)} sa ${overview.nextSchedule.location}. Ang numero sa pila kay ${formatQueueNumber(overview.nextSchedule.queueNumber)}.`,
@@ -155,12 +161,12 @@ export function HelpScreen() {
         bs: 'Mahimong mapakyas ang scan kon ngitngit o natabonan ang nawong. Pabilin sa hayag ug sulayi pag-usab. Kon dili gihapon, pangayo og tabang sa staff sa barangay.',
       },
       enroll: {
-        en: 'Open Profile → Enroll face. Read the consent notice and choose whether to continue. Enrollment is optional; you can use your phone number instead.',
-        bs: 'Ablihi ang Profile → Ienroll ang nawong. Basaha ang pagtugot ug pilia kon mopadayon. Opsyonal ang enrollment; pwede gamiton ang numero.',
+        en: 'Open Profile → View face verification → Review consent. Save consent if you agree, then visit your barangay facilitator for face capture. Phone sign-in remains available.',
+        bs: 'Ablihi ang Profile → Tan-awa ang face verification → Basaha ang pagtugot. Tipigi ang pagtugot kon mouyon, dayon bisitaha ang barangay facilitator alang sa face capture. Magamit gihapon ang pagsulod gamit ang numero.',
       },
       unknown: {
-        en: 'This assistant can read your saved schedule and claim status. Other answers remain previews. For other concerns, use Talk to staff. No live AI or support service is connected.',
-        bs: 'Mabasa sa assistant ang natipig nga iskedyul ug kahimtang sa claim. Preview pa ang ubang tubag. Alang sa uban, gamita ang Pakigsulti sa staff. Wala pay live AI o support service.',
+        en: 'This assistant reads your saved schedule and claim status and offers general guidance. Use Talk to staff to send a concern and check saved staff replies. No external AI is used here.',
+        bs: 'Mabasa sa assistant ang natipig nga iskedyul ug kahimtang sa claim ug mohatag og kinatibuk-ang giya. Gamita ang Pakigsulti sa staff aron makapadala og kabalaka ug masusi ang natipig nga tubag. Walay external AI nga gigamit dinhi.',
       },
     };
     const answer = answers[detected];
@@ -208,8 +214,8 @@ export function HelpScreen() {
         >
           <Notice>
             {t(
-              'Prototype assistant · Schedule and claim-status answers use your saved account; other answers remain previews.',
-              'Prototype assistant · Ang iskedyul ug kahimtang sa claim gikan sa imong account; preview pa ang ubang tubag.',
+              'Schedule and claim answers use your saved account. Other answers are general guidance. Talk to staff for help with your case.',
+              'Ang iskedyul ug kahimtang sa claim gikan sa imong account. Kinatibuk-ang giya ang ubang tubag. Pakigsulti sa staff alang sa imong kaso.',
             )}
           </Notice>
           {messages.map((message) => (
@@ -259,8 +265,8 @@ export function HelpScreen() {
         <View style={s.composer}>
           <TextInput
             accessibilityLabel={t(
-              'Message to the prototype assistant',
-              'Mensahe sa prototype assistant',
+              'Message to the assistant',
+              'Mensahe sa assistant',
             )}
             value={input}
             onChangeText={setInput}

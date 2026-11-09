@@ -26,6 +26,8 @@ Phase 7 prepares [mobile-sms.patch](../../integrations/shared-backend/mobile-sms
 
 Phase 8 adds [mobile-biometrics.patch](../../integrations/shared-backend/mobile-biometrics.patch) after the SMS patch. Mobile saves versioned self-consent/retention, reads facilitator enrollment status and confirms consent withdrawal. Staff captures remain in the existing facilitator workflow; staff roles are unchanged. The additive migration allows a beneficiary consent recorder with an exact-owner database constraint. Local processing remains SIMULATED and is labeled in mobile. See [biometrics setup](biometrics-setup.md) and included `docs/mobile-biometrics-integration.md`.
 
+Phase 9 adds [mobile-support.patch](../../integrations/shared-backend/mobile-support.patch) after the biometric patch. Help > Talk to staff saves owned requests and follow-ups in the existing staff escalation queue, returns saved staff replies/resolution, and supports later-login history/pagination. Staff scope/ownership are unchanged. The service reuses plain-text validation, credential redaction and chatbot retention/message limits; generic anonymous tokens cannot read mobile threads. English/Bisaya en/bs maps to staff en/ceb. No migration, dependency, external AI or delivery service is added. See [support setup](support-setup.md); updates use manual refresh.
+
 ```powershell
 git switch -c feat/mobile-beneficiary-auth 42b4552
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-v4.patch
@@ -38,6 +40,8 @@ git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-back
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-sms.patch
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-biometrics.patch
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-biometrics.patch
+git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-support.patch
+git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-support.patch
 npm ci
 npx prisma generate
 npx prisma migrate deploy
@@ -106,6 +110,8 @@ Version 4 also supports QR_OR_BIOMETRIC: QR alone can complete verification for 
 The mobile API uses multipart only for the shared `/api/v1/mobile` base. Its original local backend keeps raw-byte uploads and received status. Staff can review mobile uploads because both use the same table; uploaded_by_beneficiary records the real uploader without fabricating a staff account. File contents remain private; file-viewing UI, live SMS activation, push/preferences, transfer history, lost-number linking, and a general program catalog are later work. Those unintegrated features still show request errors under the shared prefix. Existing staff records need a separate authorized mobile-linking workflow.
 
 ## Verified result
+
+Phase 9: 52 mobile regressions, TypeScript, all three actual-client/API/database suites, web/Android exports and six controlled EN/BS browser views pass. Default backend tests remain 414 passed, nine skipped. The support suite covers idempotent creation/replies, correct staff queue scope, credential redaction, owner/public-token isolation, protected fields, resolution/expiry/retention, pagination and logout. UI tests cover failed-draft retention, duplicate taps, retry IDs, saved replies/resolution, stale requests and expired sessions; Help no longer treats unavailable schedule data as an empty account. Six backend patches apply cleanly in order, reproducing all four phase-9 files with staff policy unchanged. No live staff messages were sent during checks. Manual mobile/staff walkthrough and physical-device checks remain pending.
 
 Phase 8: all 47 mobile regressions, TypeScript, the account/claim/document and biometric actual-client/API/database suites, web/Android exports and six controlled Chrome views pass. Backend defaults remain 414 passed and nine skipped. Five ordered patches apply cleanly on 42b4552, all eight phase-8 files match and staff biometric roles are unchanged. The recorder migration is applied to both local databases. Consent-only, exact retries, staff capture, synthetic duplicate review, withdrawal, renewal, expiry, model compatibility and account isolation are checked. The local processor remains SIMULATED; no real face/camera/anti-spoof validation or upstream deployment is claimed.
 

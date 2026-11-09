@@ -1,3 +1,4 @@
+import { SupportContent } from './support';
 import { BiometricPrivacy } from './biometrics';
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, Switch, View } from 'react-native';
@@ -1262,37 +1263,7 @@ function Exception({ kind }: { kind: 'schedule' | 'expired' }) {
     </>
   );
 }
-function Support() {
-  const { t } = useDemo();
-  return (
-    <>
-      <View style={{ alignItems: 'center', paddingVertical: 16, gap: 14 }}>
-        <MessageCircle size={46} color={c.primary} />
-        <Txt variant="title">
-          {t('Get help from staff', 'Pangayo og tabang sa staff')}
-        </Txt>
-      </View>
-      <Card>
-        <Txt variant="label">{a.venue}</Txt>
-        <Txt>
-          {t(
-            'Visit your barangay facilitator for schedule, enrollment, or verification concerns.',
-            'Duola ang barangay facilitator bahin sa iskedyul, enrollment, o pagverify.',
-          )}
-        </Txt>
-      </Card>
-      <Notice>
-        {t(
-          'Support preview only. No message or request has been sent. Staff contact details and escalation need the team’s backend.',
-          'Support preview lamang. Walay mensahe o request gipadala. Kinahanglan ang backend alang sa staff contact ug escalation.',
-        )}
-      </Notice>
-      <Button onPress={() => router.replace('/(tabs)/help')}>
-        {t('Back to Help', 'Balik sa Tabang')}
-      </Button>
-    </>
-  );
-}
+function Support() { return <SupportContent />; }
 function FaceLogin() {
   const { t } = useDemo();
   return (

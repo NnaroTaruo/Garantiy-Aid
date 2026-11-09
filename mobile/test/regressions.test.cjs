@@ -17,6 +17,7 @@ function loadSource(file, mocks, globals = {}) {
     exports,
     require: (name) => {
       if (name === './biometrics') return { BiometricSummary: 'BiometricSummary', BiometricPrivacy: 'BiometricPrivacy', BiometricConsentScreen: 'BiometricConsentScreen', BiometricEnrollmentScreen: 'BiometricEnrollmentScreen' };
+      if (name === './support') return { SupportContent: 'SupportContent' };
       assert.ok(name in mocks, `Unexpected import: ${name}`);
       return mocks[name];
     },
@@ -35,6 +36,116 @@ const biometricRecord = (id, consentStatus = 'active', simulated = true) => ({
   policy: { version: 'v1.0', retentionUntil: '2027-11-01T00:00:00Z' },
   consent: { id, version: 'v1.0', status: consentStatus, consentedAt: '2026-11-01T00:00:00Z', retentionUntil: '2027-11-01T00:00:00Z', revokedAt: consentStatus === 'revoked' ? '2026-11-02T00:00:00Z' : null },
   profile: { id: id + '-profile', consentId: id, status: consentStatus === 'revoked' ? 'revoked' : 'enrolled', simulated, processorCompatible: true, enrolledAt: '2026-11-01T00:00:00Z', lastVerifiedAt: null },
+});
+
+function supportWorkspace(api, language = 'en') {
+  let cursor = 0, cleanup, writes = 0, resets = 0;
+  const slots = [], state = { accessToken: 'owner', language, reset: async () => { resets++; }, t: (en, bs) => language === 'en' ? en : bs };
+  const react = { createElement: (type, props, ...children) => ({ type, props, children }),
+    useEffect: effect => { if (!cleanup) cleanup = effect(); },
+    useState: initial => { const index = cursor++; if (!(index in slots)) slots[index] = initial;
+      return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }]; },
+    useRef: initial => { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index]; } };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const source = loadSource('screens/support.tsx', { react, 'react-native': { TextInput: 'TextInput', View: 'View' },
+    'expo-router': { router: {} }, '../state': { useDemo: () => state }, '../components': components,
+    '../format': { formatDateTime: value => value }, '../theme': { colors: {} }, '../api': { ApiRequestError,
+      getSupportRequests: async () => ({ requests: [], pagination: { page: 1, totalPages: 1 } }),
+      ...api,
+      createSupportRequest: async input => { throw new Error('Unexpected request'); },
+      ...(api.createSupportRequest ? { createSupportRequest: async (...args) => { writes++; return api.createSupportRequest(...args); } } : {}),
+      ...(api.replySupportRequest ? { replySupportRequest: async (...args) => { writes++; return api.replySupportRequest(...args); } } : {}) } });
+  const component = source.SupportContent().type;
+  const render = () => { cursor = 0; return component(); };
+  const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  return { render, nodes, state, button: text => nodes(render()).find(node => node.type === 'Button' && node.children[0] === text),
+    draft: value => nodes(render()).find(node => node.type === 'TextInput').props.onChangeText(value),
+    writes: () => writes, resets: () => resets, cleanup: () => cleanup() };
+}
+const supportThread = status => ({ request: { id: 'saved-request', status, canReply: status === 'escalated', createdAt: '2026-11-10T00:00:00Z', updatedAt: '2026-11-10T00:00:00Z' },
+  messages: [{ id: 'initial', role: 'user', text: 'A saved concern', createdAt: '2026-11-10T00:00:00Z' }] });
+
+test('support sends only on tap, preserves failed drafts and retry IDs, and confirms saved requests in EN and BS', async () => {
+  for (const language of ['en', 'bs']) {
+    let response = deferred(); const inputs = [];
+    const ui = supportWorkspace({ createSupportRequest: async (_token, input) => { inputs.push(input); return response.promise; } }, language);
+    ui.render(); await new Promise(setImmediate); assert.equal(ui.writes(), 0);
+    const label = ui.state.t('Send to staff', 'Ipadala sa staff');
+    assert.equal(ui.button(label).props.disabled, true);
+    ui.draft('Please help with enrollment.');
+    ui.button(label).props.onPress(); ui.button(label).props.onPress(); assert.equal(ui.writes(), 1);
+    assert.equal(inputs[0].language, language); assert.match(inputs[0].requestId, /^[a-f\d-]{36}$/);
+    response.reject(new Error('offline')); await new Promise(setImmediate);
+    assert.equal(ui.nodes(ui.render()).find(node => node.type === 'TextInput').props.value, 'Please help with enrollment.');
+    ui.state.language = language === 'en' ? 'bs' : 'en';
+    response = deferred(); ui.button(label).props.onPress(); assert.equal(inputs[1].requestId, inputs[0].requestId);
+    assert.equal(inputs[1].language, inputs[0].language, 'Changing UI language must not change a pending request retry');
+    response.resolve(supportThread('escalated')); await new Promise(setImmediate);
+    assert.ok(JSON.stringify(ui.render()).includes(ui.state.t('Request reference', 'Reference sa request')));
+    assert.equal(ui.nodes(ui.render()).find(node => node.type === 'TextInput').props.value, '');
+    ui.cleanup();
+  }
+});
+
+test('support refresh loads staff replies and resolution and ignores stale list failures', async () => {
+  const old = deferred(), newer = deferred(); let reads = 0;
+  const row = { ...supportThread('escalated').request, subject: 'Concern' };
+  let thread = supportThread('escalated');
+  const ui = supportWorkspace({ getSupportRequests: async () => ++reads === 1 ? { requests: [row], pagination: { page: 1, totalPages: 1 } }
+    : reads === 2 ? old.promise : newer.promise, getSupportRequest: async () => thread });
+  ui.render(); await new Promise(setImmediate);
+  ui.button('Refresh requests').props.onPress(); ui.button('Refresh requests').props.onPress();
+  newer.resolve({ requests: [row], pagination: { page: 1, totalPages: 1 } }); await new Promise(setImmediate);
+  old.reject(new ApiRequestError(401)); await new Promise(setImmediate); assert.equal(ui.resets(), 0);
+  ui.button('Open request').props.onPress(); await new Promise(setImmediate);
+  thread = { ...supportThread('resolved'), messages: [...thread.messages, { id: 'reply', role: 'staff', text: 'Synthetic reply', createdAt: '2026-11-10T01:00:00Z' }] };
+  ui.button('Refresh conversation').props.onPress(); await new Promise(setImmediate);
+  assert.ok(JSON.stringify(ui.render()).includes('Synthetic reply'));
+  assert.ok(!ui.nodes(ui.render()).some(node => node.type === 'TextInput'));
+  ui.cleanup();
+});
+
+test('support discards late saves after leaving and expires only the current account on 401', async () => {
+  for (const leave of [false, true]) {
+    const response = deferred();
+    const ui = supportWorkspace({ createSupportRequest: async () => response.promise });
+    ui.render(); await new Promise(setImmediate); ui.draft('Please help.'); ui.button('Send to staff').props.onPress();
+    if (leave) ui.cleanup();
+    response.reject(new ApiRequestError(401)); await new Promise(setImmediate);
+    assert.equal(ui.resets(), leave ? 0 : 1);
+    if (!leave) ui.cleanup();
+  }
+});
+
+test('a stale screen reset callback cannot clear a replacement account', async () => {
+  const render = provider(); await render().startSession('old', beneficiary('old'));
+  const oldReset = render().reset;
+  await render().startSession('new', beneficiary('new'));
+  await oldReset(); assert.equal(render().accessToken, 'new');
+});
+
+test('Help distinguishes unavailable, loading and confirmed empty schedules and claims in EN and BS', () => {
+  for (const language of ['en', 'bs']) for (const scenario of ['schedule-error', 'schedule-loading', 'schedule-empty', 'claim-error', 'claim-loading']) {
+    let cursor = 0; const slots = [];
+    const state = { t: (en, bs) => language === 'en' ? en : bs, overview: scenario === 'schedule-empty' ? { nextSchedule: null } : null,
+      overviewError: scenario === 'schedule-error', overviewLoading: scenario === 'schedule-loading', wallet: null, walletError: scenario === 'claim-error' };
+    const components = new Proxy({}, { get: (_, key) => String(key) });
+    const source = loadSource('screens/help.tsx', {
+      react: { createElement: (type, props, ...children) => ({ type, props, children }),
+        useState: initial => { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }]; }, useRef: () => ({ current: null }) },
+      'react-native': { ...Object.fromEntries(['View', 'Pressable', 'ScrollView', 'TextInput', 'KeyboardAvoidingView'].map(name => [name, name])), StyleSheet: { create: value => value }, Platform: { OS: 'web' } },
+      'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' }, 'lucide-react-native': components, '../components': components,
+      '../theme': { colors: {} }, '../state': { useDemo: () => state }, '../format': {},
+    });
+    const render = () => { cursor = 0; return source.HelpScreen(); };
+    const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+    const question = scenario.startsWith('schedule') ? state.t('When is my next claim?', 'Kanus-a akong sunod nga claim?') : state.t('What is my claim status?', 'Unsa ang kahimtang sa akong claim?');
+    nodes(render()).find(node => node.type === 'Pressable' && JSON.stringify(node.children).includes(question)).props.onPress();
+    const content = JSON.stringify(render());
+    const expected = scenario.endsWith('error') ? state.t('temporarily unavailable', 'Temporaryong dili makita')
+      : scenario.endsWith('empty') ? state.t('No claiming schedule is assigned', 'Wala pay iskedyul sa claim') : state.t('still loading', 'Nag-load pa');
+    assert.ok(content.includes(expected), scenario + ':' + language);
+  }
 });
 
 test('consent withdrawal survives stale reads, prevents duplicate writes, and derives real enrollment from compatible records', async () => {
