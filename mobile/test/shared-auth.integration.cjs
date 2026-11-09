@@ -72,6 +72,22 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     const records = () => api.getWalletOverview(login.accessToken);
     const notices = () => api.getNotifications(login.accessToken);
     assert.equal((await notices()).length, 0);
+    const defaultPreferences = { enrollmentUpdates: true, scheduleUpdates: true, claimUpdates: true };
+    assert.deepEqual(await api.getNotificationPreferences(login.accessToken), defaultPreferences);
+    for (const token of [null, staffToken]) for (const method of ['GET', 'PATCH']) {
+      const denied = await fetch(`${base}/mobile/beneficiaries/me/notification-preferences`, { method,
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json' },
+        ...(method === 'PATCH' ? { body: JSON.stringify(defaultPreferences) } : {}) });
+      assert.equal(denied.status, 401);
+    }
+    for (const body of [{ ...defaultPreferences, enrollmentUpdates: 'false' }, { ...defaultPreferences, beneficiaryId: randomUUID() }, { pushEnabled: true }, {}]) {
+      const invalid = await fetch(`${base}/mobile/beneficiaries/me/notification-preferences`, { method: 'PATCH',
+        headers: { Authorization: `Bearer ${login.accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      assert.ok(invalid.status >= 400 && invalid.status < 500);
+    }
+    assert.deepEqual(await api.updateNotificationPreferences(login.accessToken, { ...defaultPreferences, enrollmentUpdates: false }), { ...defaultPreferences, enrollmentUpdates: false });
+    const privatePreferences = await fetch(`${base}/mobile/beneficiaries/me/notification-preferences`, { headers: { Authorization: `Bearer ${login.accessToken}` } });
+    assert.equal(privatePreferences.headers.get('cache-control'), 'private, no-store');
     for (const token of [null, staffToken]) {
       assert.equal((await fetch(`${base}/mobile/beneficiaries/me/notifications`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })).status, 401);
     }
@@ -102,6 +118,8 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     assert.equal((await overview()).enrollments[0].status, 'pending');
     await staffRequest(`/enrollments/${enrollmentId}/start-review`, reviewerToken);
     assert.equal((await overview()).enrollments[0].status, 'for_validation');
+    assert.equal((await notices()).length, 0, 'An actual staff review honors the saved enrollment preference');
+    await api.updateNotificationPreferences(login.accessToken, defaultPreferences);
     await staffRequest(`/enrollments/${enrollmentId}/request-correction`, reviewerToken, { reason: 'Please correct the sample application details.' });
     const correction = (await overview()).enrollments[0];
     assert.equal(correction.status, 'needs_correction');
@@ -130,6 +148,7 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     const other = await api.registerBeneficiary({ firstName: 'Other', middleName: '', lastName: 'Synthetic', birthDate: '1990-01-01', sex: 'female', address: 'Other sample address', barangayId, contactNumber: otherPhone });
     extraBeneficiaries.push(other.beneficiary.id);
     const otherLogin = await api.verifyOtp(otherPhone, 'register', other.developmentOtp);
+    assert.deepEqual(await api.getNotificationPreferences(otherLogin.accessToken), defaultPreferences);
     assert.equal((await api.getBeneficiaryOverview(otherLogin.accessToken)).enrollments.length, 0);
     const distributionId = randomUUID();
     distributionIds.push(distributionId);
@@ -361,6 +380,31 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     const returning = await api.verifyOtp(contactNumber, 'login', returningCode.developmentOtp);
     assert.equal((await api.getNotifications(returning.accessToken)).find(item => item.id === noticeId).readAt, readResults[0].readAt);
     const { createMobileNotifications } = await load('src/modules/mobile/mobileNotifications.service.js');
+    const beforePreferences = await notices();
+    for (const [field, event] of [['enrollmentUpdates', 'ENROLLMENT_REJECTED'], ['scheduleUpdates', 'SCHEDULE_PUBLISHED'], ['claimUpdates', 'CLAIM_VERIFIED']]) {
+      const disabled = { ...defaultPreferences, [field]: false };
+      assert.deepEqual(await api.updateNotificationPreferences(login.accessToken, disabled), disabled);
+      const beforeOwner = await prisma.notification.count({ where: { beneficiaryId } });
+      const beforeOther = await prisma.notification.count({ where: { beneficiaryId: other.beneficiary.id } });
+      await prisma.$transaction(tx => createMobileNotifications(tx, [beneficiaryId, other.beneficiary.id].map(id => ({ beneficiaryId: id, type: event, reference: randomUUID() }))));
+      assert.equal(await prisma.notification.count({ where: { beneficiaryId } }), beforeOwner);
+      assert.equal(await prisma.notification.count({ where: { beneficiaryId: other.beneficiary.id } }), beforeOther + 1);
+      assert.deepEqual(await api.getNotificationPreferences(otherLogin.accessToken), defaultPreferences);
+      await api.updateNotificationPreferences(login.accessToken, defaultPreferences);
+      const reference = randomUUID();
+      await prisma.$transaction(tx => createMobileNotifications(tx, [{ beneficiaryId, type: event, reference }]));
+      await prisma.$transaction(tx => createMobileNotifications(tx, [{ beneficiaryId, type: event, reference }]));
+      assert.equal(await prisma.notification.count({ where: { beneficiaryId } }), beforeOwner + 1, 'Re-enabled alerts retain event deduplication');
+    }
+    const keptInbox = await notices();
+    assert.ok(beforePreferences.every(old => keptInbox.some(item => item.id === old.id)), 'Saved inbox history is retained');
+    const disabledAll = { enrollmentUpdates: false, scheduleUpdates: false, claimUpdates: false };
+    await api.updateNotificationPreferences(login.accessToken, disabledAll);
+    assert.deepEqual(await notices(), keptInbox);
+    assert.deepEqual(await api.getNotificationPreferences(returning.accessToken), disabledAll, 'Another signed-in session reads the saved preferences');
+    await prisma.$transaction(tx => createMobileNotifications(tx, ['ENROLLMENT_REJECTED', 'SCHEDULE_PUBLISHED', 'ASSISTANCE_RELEASED'].map(type => ({ beneficiaryId, type, reference: randomUUID() }))));
+    assert.deepEqual(await notices(), keptInbox);
+    await api.updateNotificationPreferences(login.accessToken, defaultPreferences);
     const beforeRollback = await prisma.notification.count({ where: { beneficiaryId } });
     await assert.rejects(prisma.$transaction(async tx => {
       await createMobileNotifications(tx, [{ beneficiaryId, type: 'ENROLLMENT_REJECTED', reference: randomUUID() }]);
@@ -547,6 +591,8 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     await api.logout(login.accessToken);
     await assert.rejects(api.downloadDocument(login.accessToken, document), error => error.status === 401);
     await assert.rejects(api.getDocumentRequirements(login.accessToken), error => error.status === 401);
+    await assert.rejects(api.getNotificationPreferences(login.accessToken), error => error.status === 401);
+    await assert.rejects(api.updateNotificationPreferences(login.accessToken, defaultPreferences), error => error.status === 401);
     await assert.rejects(api.getCurrentBeneficiary(login.accessToken), (error) => error.status === 401);
     await assert.rejects(overview(), (error) => error.status === 401);
     await assert.rejects(records(), (error) => error.status === 401);

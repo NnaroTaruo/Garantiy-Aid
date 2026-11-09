@@ -32,6 +32,10 @@ Phase 10 adds [mobile-document-requirements.patch](../../integrations/shared-bac
 
 Phase 11 adds [mobile-document-viewing.patch](../../integrations/shared-backend/mobile-document-viewing.patch) after the checklist patch. It serves the saved upload-validated MIME on the existing private content route. Mobile validates PDF/image bytes before a temporary preview/download; Android uses expo-sharing for the system open/save chooser. No backend dependency, migration or staff frontend change is added. See [document viewing](document-viewing.md).
 
+Phase 12 adds [mobile-notification-preferences.patch](../../integrations/shared-backend/mobile-notification-preferences.patch) after the viewer patch. It saves strict own-account Boolean preferences for automatic enrollment, schedule and claim/release IN_APP updates, honored in future staff event transactions. Existing inbox/read state and staff broadcasts remain available. Its additive three-column migration defaults to enabled; no dependency or staff frontend change is added. SMS/push remain inactive. See [notification settings](notification-settings.md).
+
+Phase 13 adds [mobile-push-notifications.patch](../../integrations/shared-backend/mobile-push-notifications.patch) after the preferences patch. It provides a per-session Android push opt-in (`GET/PUT/DELETE /beneficiaries/me/push-device`) with encrypted tokens, one owner per device, and deletion on logout. Staff transactions that already create automatic IN_APP notices also write outbox rows. An in-process dispatcher sends generic EN/BS alerts through Expo only after the staff transaction commits, outside any database transaction. Delivery is at most once, with backoff on retryable failures, and `DeviceNotRegistered` disables the device. The additive migration creates two tables. There is no new backend dependency, Redis requirement or staff frontend change; mobile adds SDK-compatible `expo-notifications`. Push stays off until `MOBILE_PUSH_MODE=EXPO`, and real delivery needs the account setup in [Android phone alerts](push-notifications.md).
+
 ```powershell
 git switch -c feat/mobile-beneficiary-auth 42b4552
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-v4.patch
@@ -50,6 +54,10 @@ git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-back
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-document-requirements.patch
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-document-viewing.patch
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-document-viewing.patch
+git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-notification-preferences.patch
+git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-notification-preferences.patch
+git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-push-notifications.patch
+git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-push-notifications.patch
 npm ci
 npx prisma generate
 npx prisma migrate deploy
@@ -118,6 +126,15 @@ Version 4 also supports QR_OR_BIOMETRIC: QR alone can complete verification for 
 The mobile API uses multipart only for the shared `/api/v1/mobile` base. Its original local backend keeps raw-byte uploads and received status. Staff can review mobile uploads because both use the same table; uploaded_by_beneficiary records the real uploader without fabricating a staff account. View saved document fetches private bytes for preview/download; use Profile > Enrollment documents to test it. Run npm.cmd ci inside mobile after updating for the SDK-compatible expo-sharing module. Live SMS activation, push/preferences, transfer history, lost-number linking, and a general program catalog remain later work. Unintegrated record screens still show request errors under the shared prefix. Existing staff records need a separate authorized mobile-linking workflow.
 
 ## Verified result
+
+Phase 13 results:
+- **Tests:** 78 mobile regressions (63 earlier plus 15 push), TypeScript, all four actual-client/API/database suites and the expanded explicit backend `test:mobile:push` suite pass on isolated PostgreSQL 51244. The default backend suite reports 422 passed, 10 skipped and 0 failed. New checks cover stalled response bodies, old-registration failures, current-registration invalidation and bounded per-device rate-limit retries.
+- **Builds and browser:** web and Android exports pass. Five synthetic Chrome views at 390/320 in EN/BS show the browser explanation and the notice lookup, with no push API calls, page errors or horizontal overflow.
+- **Patch:** all ten patches apply on clean 42b4552 and reproduce the 18 phase-13 backend files. The staff notice controllers and the SMS worker are unchanged.
+- **Migrations:** both additive push migrations are applied to isolated test database 51244 and persisted development database 51234. Existing claim/receipt records and private configuration were preserved; API readiness returns 200.
+- **Not tested:** real Expo/FCM delivery, permission prompts and tap launches on a phone. Tests use a fake provider.
+
+Phase 12: 63 mobile regressions, TypeScript, three actual-client/API/database suites, 414 default backend tests (nine skipped), and web/Android exports pass. Preferences are tested through actual staff review, defaults/strict input/private headers, other-owner/staff/session isolation, suppression/re-enabling/deduplication, preserved history, another signed-in session and logout. UI tests cover EN/BS retained failed drafts, repeated saves and late/401 responses. Six synthetic Chrome views at 390/320 verify persisted settings, save/load failure and retry without browser errors or horizontal overflow. All nine patches apply on clean 42b4552 and reproduce the seven phase-12 backend files. The additive migration is applied on isolated test PostgreSQL 51244 and local development PostgreSQL 51234. Android runtime delivery remains untested and inactive.
 
 Phase 11: 61 mobile regressions, TypeScript, three actual-client/API/database suites, 414 default backend tests (nine skipped), and web/Android exports pass. File checks cover byte/MIME integrity, a misleading filename extension, owner/staff isolation, removed/missing files and logout. UI checks cover cancellation, stale results, cleanup, chooser failures and EN/BS retry. Six synthetic browser views cover preview, download, failure/retry and small-screen wrapping; downloads match the sample bytes and closed blobs are revoked. Eight portable patches apply on clean 42b4552 and reproduce the two phase-11 backend files. Physical Android opening/saving remains untested; no live beneficiary files were opened during automated checks.
 

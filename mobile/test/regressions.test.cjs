@@ -20,6 +20,8 @@ function loadSource(file, mocks, globals = {}) {
       if (name === './support') return { SupportContent: 'SupportContent' };
       if (name === './document-checklist') return { DocumentChecklist: 'DocumentChecklist' };
       if (name === './document-preview') return { DocumentPreview: 'DocumentPreview' };
+      if (name === './notification-settings') return { NotificationSettings: 'NotificationSettings' };
+      if (name === './phone-alerts') return { PhoneAlerts: 'PhoneAlerts' };
       assert.ok(name in mocks, `Unexpected import: ${name}`);
       return mocks[name];
     },
@@ -32,6 +34,68 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+
+function notificationSettings(api, language = 'en') {
+  const slots = []; let cursor = 0, effect, resets = 0;
+  const state = { accessToken: 'settings-owner', reset: async () => { resets++; }, t: (en, bs) => language === 'en' ? en : bs };
+  const useState = initial => { const id = cursor++; if (!(id in slots)) slots[id] = initial; return [slots[id], value => { slots[id] = value; }]; };
+  const source = loadSource('screens/notification-settings.tsx', {
+    react: { createElement: (type, props, ...children) => ({ type, props, children }), useState,
+      useRef: initial => useState({ current: initial })[0], useEffect: callback => { effect = callback; } },
+    'react-native': { Platform: { OS: 'web' }, Pressable: 'Pressable', Switch: 'Switch', View: 'View' }, '../components': new Proxy({}, { get: (_, key) => key === 'styles' ? {} : String(key) }),
+    '../api': { ApiRequestError, IS_SHARED_BACKEND: true, ...api }, '../state': { useDemo: () => state }, '../theme': { colors: {} },
+  });
+  const render = () => { cursor = 0; return source.SavedNotificationSettings(); };
+  const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  return { render, nodes, state, start: () => effect(), resets: () => resets,
+    button: (en, bs) => nodes(render()).find(node => node.type === 'Button' && node.children[0] === state.t(en, bs)),
+    switches: () => nodes(render()).filter(node => node.props?.accessibilityRole === 'switch'), wrapper: () => source.NotificationSettings() };
+}
+
+test('notification settings load real values and retain failed changes until a single save is confirmed in EN and BS', async () => {
+  for (const language of ['en', 'bs']) {
+    const initial = { enrollmentUpdates: true, scheduleUpdates: false, claimUpdates: true };
+    let loads = 0, saves = 0, result = deferred(), body;
+    const screen = notificationSettings({ getNotificationPreferences: async () => { if (++loads === 1) throw new Error('Offline'); return initial; },
+      updateNotificationPreferences: async (_token, input) => { saves++; body = input; return result.promise; } }, language);
+    screen.render(); const cleanup = screen.start(); assert.equal(screen.switches().length, 0); await new Promise(setImmediate);
+    assert.equal(screen.switches().length, 0);
+    await screen.button('Try again', 'Sulayi pag-usab').props.onPress(); await new Promise(setImmediate);
+    assert.deepEqual(screen.switches().map(node => node.props.accessibilityState.checked), [true, false, true]);
+    assert.deepEqual(screen.switches().map(node => node.props['aria-checked']), [true, false, true]);
+    assert.ok(screen.switches().every(node => node.props.style.at(-1).minHeight === 48));
+    screen.switches()[0].props.onPress();
+    const pending = screen.button('Save preferences', 'Tipigi ang mga setting').props.onPress();
+    screen.button('Save preferences', 'Tipigi ang mga setting').props.onPress(); assert.equal(saves, 1);
+    assert.ok(screen.switches().every(node => node.props.disabled));
+    result.reject(new Error('Unconfirmed save')); await pending; await new Promise(setImmediate);
+    assert.equal(screen.switches()[0].props.accessibilityState.checked, false); assert.equal(screen.button('Save preferences', 'Tipigi ang mga setting').props.disabled, false);
+    assert.ok(screen.nodes(screen.render()).some(node => node.props?.accessibilityRole === 'alert' && node.props.accessibilityLiveRegion === 'polite'));
+    assert.ok(!JSON.stringify(screen.render()).includes(screen.state.t('Preferences saved to your account.', 'Natipig sa imong account ang mga setting.')));
+    result = deferred(); screen.button('Save preferences', 'Tipigi ang mga setting').props.onPress(); result.resolve(body); await new Promise(setImmediate);
+    assert.deepEqual({ ...body }, { ...initial, enrollmentUpdates: false }); assert.equal(saves, 2);
+    assert.ok(JSON.stringify(screen.render()).includes(screen.state.t('Preferences saved to your account.', 'Natipig sa imong account ang mga setting.')));
+    assert.equal(screen.button('Save preferences', 'Tipigi ang mga setting').props.disabled, true);
+    assert.equal(screen.wrapper().props.key, 'settings-owner'); cleanup();
+  }
+});
+
+test('late notification preference reads and saves cannot affect a closed account; current 401 signs out', async () => {
+  const initial = { enrollmentUpdates: true, scheduleUpdates: true, claimUpdates: true };
+  for (const operation of ['load', 'save']) for (const outcome of ['success', 'unauthorized']) {
+    const waiting = deferred();
+    const screen = notificationSettings({ getNotificationPreferences: async () => operation === 'load' ? waiting.promise : initial,
+      updateNotificationPreferences: async () => waiting.promise });
+    screen.render(); const cleanup = screen.start(); await new Promise(setImmediate);
+    if (operation === 'save') { screen.switches()[0].props.onPress(); screen.button('Save preferences', 'Tipigi ang mga setting').props.onPress(); }
+    cleanup();
+    if (outcome === 'unauthorized') waiting.reject(new ApiRequestError(401)); else waiting.resolve(initial);
+    await new Promise(setImmediate); assert.equal(screen.resets(), 0);
+    assert.ok(!JSON.stringify(screen.render()).includes('Preferences saved to your account.'));
+  }
+  const expired = notificationSettings({ getNotificationPreferences: async () => { throw new ApiRequestError(401); } });
+  expired.render(); const cleanup = expired.start(); await new Promise(setImmediate); assert.equal(expired.resets(), 1); cleanup();
+});
 
 test('document downloads authenticate privately, validate saved bytes, and reject unavailable or mismatched files', async () => {
   const bytes = new TextEncoder().encode('%PDF-1.4\nSynthetic transport fixture').buffer;

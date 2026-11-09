@@ -1,0 +1,1383 @@
+diff --git a/.env.example b/.env.example
+index 295036d..d5ca408 100644
+--- a/.env.example
++++ b/.env.example
+@@ -20,6 +20,14 @@ MOBILE_AUTH_MODE=DISABLED
+ # MOBILE_SMS_SEMAPHORE_API_KEY=
+ # MOBILE_SMS_SENDER_NAME=
+ MOBILE_SMS_TIMEOUT_MS=8000
++# Android push for beneficiaries is opt-in. EXPO sends generic alerts through Expo's push service
++# after staff transactions commit; it requires MOBILE_AUTH_SECRET and FIELD_ENCRYPTION_KEY.
++# Real delivery also needs an EAS project with FCM V1 credentials and a development/release build.
++MOBILE_PUSH_MODE=DISABLED
++# Optional; required only if "Enhanced push security" is enabled for the Expo project.
++# MOBILE_PUSH_EXPO_ACCESS_TOKEN=
++MOBILE_PUSH_TIMEOUT_MS=10000
++MOBILE_PUSH_DISPATCH_INTERVAL_MS=3000
+ # Optional private document directory. Default: uploads/beneficiary-documents relative to the API working directory.
+ # DOCUMENT_STORAGE_DIR=
+ FIELD_ENCRYPTION_KEY=replace-with-exactly-64-hexadecimal-characters
+diff --git a/docs/mobile-push-integration.md b/docs/mobile-push-integration.md
+new file mode 100644
+index 0000000..8171baf
+--- /dev/null
++++ b/docs/mobile-push-integration.md
+@@ -0,0 +1,78 @@
++# Mobile Android phone alerts (push)
++
++Apply `mobile-push-notifications.patch` after `mobile-notification-preferences.patch` and the preceding version-4 mobile patches on clean backend `42b4552`. Then run Prisma generate and migrate deploy before restarting the API. The first additive migration creates `beneficiary_mobile_push_devices` and `beneficiary_mobile_push_deliveries`; the second versions registrations and snapshots the registration used for a send. An existing installation that already applied the first migration applies only the second one; no reset is needed. No dependency or staff frontend change is added. Sending uses Node's built-in `fetch` against Expo's push service.
++
++## What it does
++
++- A signed-in beneficiary can turn on phone alerts for **the current mobile session** only. This is a separate opt-in from the saved category preferences.
++- When a staff transaction creates an automatic in-app notice through `createMobileNotifications`, the same transaction writes one outbox row per eligible phone. If the staff transaction rolls back, nothing is queued.
++- An in-process dispatcher (`src/workers/mobilePush.worker.js`) polls the committed outbox. It claims rows with `FOR UPDATE SKIP LOCKED` and calls Expo **outside any database transaction**. It then records each result only if it still owns the claim.
++- Lock-screen text is generic in English or Bisaya ("You have a new account update. Open the app to view it."). The payload carries only `{ kind: "garantiyaid.notification", notificationId }`, and the app loads the details through the signed-in account.
++
++## Routes (mobile session required, `Cache-Control: private, no-store`)
++
++- `GET /api/v1/mobile/beneficiaries/me/push-device` returns `{ configured, status: "unavailable" | "off" | "on" | "invalid", enabled, language, updatedAt }`. It never returns the token.
++- `PUT /api/v1/mobile/beneficiaries/me/push-device` with body `{ token: "ExponentPushToken[...]", platform: "android", language: "en" | "bs" }`. The token travels only in this JSON body, never in a URL. The route is strictly validated and rate-limited with the mobile authentication limiter. It returns 503 `PUSH_UNAVAILABLE` when push is not configured.
++- `DELETE /api/v1/mobile/beneficiaries/me/push-device` turns alerts off for this session.
++
++## Security and delivery contract
++
++- **Token storage.** Tokens are AES-256-GCM encrypted with `FIELD_ENCRYPTION_KEY`, bound to their device row. A keyed HMAC (`MOBILE_AUTH_SECRET`) enforces one owner per physical device. Raw tokens are never logged, stored in plain text, returned, or placed in URLs. Provider error text, which can echo tokens, is reduced to known-shaped codes.
++- **Account changes.** Registering a token that belongs to another session moves it: the previous session or account stops receiving alerts in the same commit, and its pending alerts cascade away. Logout deletes the session's registration in the logout transaction.
++- **Send-time re-check.** Before sending, the dispatcher re-checks the following. Anything ineligible is cancelled with a reason code.
++  - The session is active and not expired, and its auth mode matches.
++  - The account is verified and active.
++  - The device belongs to the notice owner.
++  - The notice is a visible IN_APP notice that hasn't already been read.
++  - The category preference is still enabled.
++  - The alert is less than 24 hours old.
++- **Duplicates.**
++  - The outbox has a unique `(notification_id, device_id)` key.
++  - Staff replays that hit an existing notice deduplication key queue nothing.
++  - A successful or unconfirmed send is not deliberately resent. A provider-confirmed rate-limit rejection may return just that alert to the pending queue.
++  - A row whose send outcome is unknown (in flight past the 2-minute lease, or a provider timeout) is marked `FAILED` with `PUSH_RESULT_UNKNOWN`/`PUSH_PROVIDER_TIMEOUT` rather than resent. Expo/provider delivery itself remains best effort, not an exactly-once guarantee.
++- **Retries.** Network failures, 429/5xx and individual `MessageRateExceeded` ticket/receipt errors back off (30 s, then 60 s) for up to three send attempts. A rejected receipt clears the old ticket and receipt state before requeueing only its alert. Other 4xx responses and permanent ticket/receipt errors finish without resending. Request deadlines cover response bodies as well as headers.
++- **Invalid tokens.** Each registration receives a fresh internal registration ID. Sends snapshot it; `DeviceNotRegistered` disables only that matching registration and cancels only its pending alerts. Delayed results for an older registration cannot invalidate a replacement or cancel its alerts. Pre-upgrade sent rows have no snapshot and conservatively cannot disable a current registration. GET reports `invalid` only for a disabled current registration, and the app asks the user to turn alerts on again. Receipts are checked about 15 minutes after sending; Expo keeps them for 24 hours.
++- **Housekeeping.** About once a minute, unknown in-flight rows are failed, registrations of revoked or expired sessions are deleted, and finished delivery history older than 30 days is removed.
++
++## Configuration
++
++```
++MOBILE_PUSH_MODE=EXPO                  # default DISABLED; EXPO requires MOBILE_AUTH_SECRET and FIELD_ENCRYPTION_KEY
++# MOBILE_PUSH_EXPO_ACCESS_TOKEN=       # only if Enhanced push security is enabled for the Expo project
++MOBILE_PUSH_TIMEOUT_MS=10000
++MOBILE_PUSH_DISPATCH_INTERVAL_MS=3000
++```
++
++The dispatcher starts with the API only in `EXPO` mode. With `DISABLED`, no outbox rows are written, registration returns 503, and the app shows "not set up on this server". Running several API instances is safe because claims use database row locks. Redis and the existing BullMQ notification worker are not required.
++
++Real delivery also needs:
++- an Expo (EAS) project ID in the mobile app config;
++- an FCM V1 service-account key uploaded to that project's credentials;
++- the matching `google-services.json` and Android package in a development or release build. Expo Go cannot receive Android remote push since SDK 53.
++
++## Tests
++
++- `test/mobile-push.test.js` (default suite) covers:
++  - provider request shape, access token, retry classification and token-free errors;
++  - a response body stalling after headers, for sends and receipt lookups;
++  - receipts;
++  - generic EN/BS messages;
++  - token encryption and binding;
++  - strict input;
++  - disabled mode.
++- `npm run test:mobile:push` (explicit, isolated database only, `RUN_MOBILE_DB_TESTS=1`) uses a fake provider to cover:
++  - per-session opt-in and privacy;
++  - rollback and replay safety;
++  - a single send per notice;
++  - preference and read-state checks at send time;
++  - backoff and the attempt limit;
++  - individual rate limits from tickets and receipts, stale registration results and pre-upgrade sends;
++  - at-most-once handling of unknown outcomes;
++  - `DeviceNotRegistered` from tickets and receipts, and re-enabling;
++  - moving a device between accounts;
++  - turning alerts off, logout, and session expiry;
++  - disabled mode;
++  - no tokens in logs.
++
++None of these tests sends a real push notification. Delivery to a phone must be validated on a device.
+diff --git a/package.json b/package.json
+index ef1095d..90cd4f9 100644
+--- a/package.json
++++ b/package.json
+@@ -10,6 +10,7 @@
+     "test": "node --test",
+     "test:mobile:integration": "node --test test/mobile-auth.integration.js",
+     "test:mobile:documents": "node --test test/mobile-documents.integration.js",
++    "test:mobile:push": "node --test test/mobile-push.integration.js",
+     "dev": "node --watch --watch-preserve-output src/server.js",
+     "start": "node src/server.js",
+     "worker:notifications": "node src/workers/notification.worker.js",
+diff --git a/prisma/migrations/20261110000400_add_mobile_push_devices/migration.sql b/prisma/migrations/20261110000400_add_mobile_push_devices/migration.sql
+new file mode 100644
+index 0000000..f9680cc
+--- /dev/null
++++ b/prisma/migrations/20261110000400_add_mobile_push_devices/migration.sql
+@@ -0,0 +1,77 @@
++-- Additive: per-session Android push opt-in and a post-commit delivery outbox. Existing rows are unchanged.
++-- CreateTable
++CREATE TABLE "beneficiary_mobile_push_devices" (
++    "device_id" UUID NOT NULL,
++    "account_id" UUID NOT NULL,
++    "session_id" UUID NOT NULL,
++    "token_hash" CHAR(64) NOT NULL,
++    "token_ciphertext" TEXT NOT NULL,
++    "platform" VARCHAR(10) NOT NULL,
++    "language" VARCHAR(2) NOT NULL DEFAULT 'en',
++    "disabled_at" TIMESTAMPTZ(6),
++    "disabled_reason" VARCHAR(40),
++    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updated_at" TIMESTAMPTZ(6) NOT NULL,
++
++    CONSTRAINT "beneficiary_mobile_push_devices_pkey" PRIMARY KEY ("device_id")
++);
++
++-- CreateTable
++CREATE TABLE "beneficiary_mobile_push_deliveries" (
++    "delivery_id" UUID NOT NULL,
++    "notification_id" UUID NOT NULL,
++    "device_id" UUID NOT NULL,
++    "status" VARCHAR(20) NOT NULL DEFAULT 'PENDING',
++    "attempt_count" INTEGER NOT NULL DEFAULT 0,
++    "next_attempt_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "processing_token" UUID,
++    "processing_started_at" TIMESTAMPTZ(6),
++    "ticket_id" VARCHAR(100),
++    "receipt_check_after" TIMESTAMPTZ(6),
++    "receipt_status" VARCHAR(20),
++    "last_error_code" VARCHAR(50),
++    "sent_at" TIMESTAMPTZ(6),
++    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updated_at" TIMESTAMPTZ(6) NOT NULL,
++
++    CONSTRAINT "beneficiary_mobile_push_deliveries_pkey" PRIMARY KEY ("delivery_id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "beneficiary_mobile_push_devices_session_id_key" ON "beneficiary_mobile_push_devices"("session_id");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "beneficiary_mobile_push_devices_token_hash_key" ON "beneficiary_mobile_push_devices"("token_hash");
++
++-- CreateIndex
++CREATE INDEX "beneficiary_mobile_push_devices_account_id_idx" ON "beneficiary_mobile_push_devices"("account_id");
++
++-- CreateIndex
++CREATE INDEX "beneficiary_mobile_push_deliveries_status_next_attempt_at_idx" ON "beneficiary_mobile_push_deliveries"("status", "next_attempt_at");
++
++-- CreateIndex
++CREATE INDEX "beneficiary_mobile_push_deliveries_status_receipt_check_aft_idx" ON "beneficiary_mobile_push_deliveries"("status", "receipt_check_after");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "beneficiary_mobile_push_deliveries_notification_id_device_i_key" ON "beneficiary_mobile_push_deliveries"("notification_id", "device_id");
++
++-- AddForeignKey
++ALTER TABLE "beneficiary_mobile_push_devices" ADD CONSTRAINT "beneficiary_mobile_push_devices_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "beneficiary_mobile_accounts"("account_id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "beneficiary_mobile_push_devices" ADD CONSTRAINT "beneficiary_mobile_push_devices_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "beneficiary_mobile_sessions"("session_id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "beneficiary_mobile_push_deliveries" ADD CONSTRAINT "beneficiary_mobile_push_deliveries_notification_id_fkey" FOREIGN KEY ("notification_id") REFERENCES "notifications"("notification_id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "beneficiary_mobile_push_deliveries" ADD CONSTRAINT "beneficiary_mobile_push_deliveries_device_id_fkey" FOREIGN KEY ("device_id") REFERENCES "beneficiary_mobile_push_devices"("device_id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++
++-- Reject values the dispatcher does not understand.
++ALTER TABLE "beneficiary_mobile_push_devices"
++  ADD CONSTRAINT "beneficiary_mobile_push_devices_platform_check" CHECK ("platform" IN ('android')),
++  ADD CONSTRAINT "beneficiary_mobile_push_devices_language_check" CHECK ("language" IN ('en', 'bs'));
++ALTER TABLE "beneficiary_mobile_push_deliveries"
++  ADD CONSTRAINT "beneficiary_mobile_push_deliveries_status_check" CHECK ("status" IN ('PENDING', 'SENT', 'FAILED', 'CANCELLED')),
++  ADD CONSTRAINT "beneficiary_mobile_push_deliveries_attempt_check" CHECK ("attempt_count" >= 0);
+diff --git a/prisma/migrations/20261110000500_version_mobile_push_registrations/migration.sql b/prisma/migrations/20261110000500_version_mobile_push_registrations/migration.sql
+new file mode 100644
+index 0000000..4ed2ac5
+--- /dev/null
++++ b/prisma/migrations/20261110000500_version_mobile_push_registrations/migration.sql
+@@ -0,0 +1,5 @@
++-- Preserve registrations and delivery history while binding new sends to an exact registration.
++ALTER TABLE "beneficiary_mobile_push_devices" ADD COLUMN "registration_id" UUID;
++UPDATE "beneficiary_mobile_push_devices" SET "registration_id" = "device_id";
++ALTER TABLE "beneficiary_mobile_push_devices" ALTER COLUMN "registration_id" SET NOT NULL;
++ALTER TABLE "beneficiary_mobile_push_deliveries" ADD COLUMN "sent_registration_id" UUID;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 25f42ed..ae663e3 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -526,6 +526,7 @@ model BeneficiaryMobileAccount {
+   beneficiary Beneficiary            @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
+   challenges  BeneficiaryMobileOtp[]
+   sessions    BeneficiaryMobileSession[]
++  pushDevices BeneficiaryMobilePushDevice[]
+ 
+   @@map("beneficiary_mobile_accounts")
+ }
+@@ -557,12 +558,65 @@ model BeneficiaryMobileSession {
+   revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+ 
+-  account BeneficiaryMobileAccount @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
++  account    BeneficiaryMobileAccount     @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
++  pushDevice BeneficiaryMobilePushDevice?
+ 
+   @@index([accountId, expiresAt])
+   @@map("beneficiary_mobile_sessions")
+ }
+ 
++// Remote push is a separate per-device opt-in bound to the signed-in session that registered it.
++// The provider token is stored encrypted; its keyed hash enforces one owner per physical device.
++model BeneficiaryMobilePushDevice {
++  deviceId        String    @id @default(uuid()) @map("device_id") @db.Uuid
++  registrationId  String    @default(uuid()) @map("registration_id") @db.Uuid
++  accountId       String    @map("account_id") @db.Uuid
++  sessionId       String    @unique @map("session_id") @db.Uuid
++  tokenHash       String    @unique @map("token_hash") @db.Char(64)
++  tokenCiphertext String    @map("token_ciphertext") @db.Text
++  platform        String    @db.VarChar(10)
++  language        String    @default("en") @db.VarChar(2)
++  disabledAt      DateTime? @map("disabled_at") @db.Timestamptz(6)
++  disabledReason  String?   @map("disabled_reason") @db.VarChar(40)
++  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
++  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
++
++  account    BeneficiaryMobileAccount        @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
++  session    BeneficiaryMobileSession        @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
++  deliveries BeneficiaryMobilePushDelivery[]
++
++  @@index([accountId])
++  @@map("beneficiary_mobile_push_devices")
++}
++
++// Outbox rows are written in the staff transaction and sent by the dispatcher only after commit.
++model BeneficiaryMobilePushDelivery {
++  deliveryId          String    @id @default(uuid()) @map("delivery_id") @db.Uuid
++  notificationId      String    @map("notification_id") @db.Uuid
++  deviceId            String    @map("device_id") @db.Uuid
++  status              String    @default("PENDING") @db.VarChar(20)
++  attemptCount        Int       @default(0) @map("attempt_count")
++  nextAttemptAt       DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
++  processingToken     String?   @map("processing_token") @db.Uuid
++  processingStartedAt DateTime? @map("processing_started_at") @db.Timestamptz(6)
++  ticketId            String?   @map("ticket_id") @db.VarChar(100)
++  receiptCheckAfter   DateTime? @map("receipt_check_after") @db.Timestamptz(6)
++  receiptStatus       String?   @map("receipt_status") @db.VarChar(20)
++  lastErrorCode       String?   @map("last_error_code") @db.VarChar(50)
++  sentAt              DateTime? @map("sent_at") @db.Timestamptz(6)
++  sentRegistrationId  String?   @map("sent_registration_id") @db.Uuid
++  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
++  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
++
++  notification Notification                @relation(fields: [notificationId], references: [notificationId], onDelete: Cascade)
++  device       BeneficiaryMobilePushDevice @relation(fields: [deviceId], references: [deviceId], onDelete: Cascade)
++
++  @@unique([notificationId, deviceId])
++  @@index([status, nextAttemptAt])
++  @@index([status, receiptCheckAfter])
++  @@map("beneficiary_mobile_push_deliveries")
++}
++
+ model Enrollment {
+   enrollmentId        String           @id @default(uuid()) @map("enrollment_id") @db.Uuid
+   beneficiaryId       String           @map("beneficiary_id") @db.Uuid
+@@ -1112,6 +1166,7 @@ model Notification {
+   schedule     Schedule?     @relation(fields: [scheduleId], references: [scheduleId], onDelete: SetNull)
+   distribution Distribution? @relation(fields: [distributionId], references: [distributionId], onDelete: SetNull)
+   initiatedBy  User?         @relation("NotificationInitiator", fields: [initiatedById], references: [userId], onDelete: SetNull)
++  pushDeliveries BeneficiaryMobilePushDelivery[]
+ 
+   @@index([beneficiaryId, createdAt])
+   @@index([scheduleId, createdAt])
+diff --git a/src/config/env.js b/src/config/env.js
+index 6acb77c..4707184 100644
+--- a/src/config/env.js
++++ b/src/config/env.js
+@@ -35,6 +35,10 @@ const environmentSchema = z.object({
+   MOBILE_SMS_SEMAPHORE_API_KEY: optionalTrimmedString,
+   MOBILE_SMS_SENDER_NAME: optionalTrimmedString.pipe(z.string().max(11).optional()),
+   MOBILE_SMS_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(10_000).default(8_000),
++  MOBILE_PUSH_MODE: z.enum(["DISABLED", "EXPO"]).default("DISABLED"),
++  MOBILE_PUSH_EXPO_ACCESS_TOKEN: optionalTrimmedString,
++  MOBILE_PUSH_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(10_000),
++  MOBILE_PUSH_DISPATCH_INTERVAL_MS: z.coerce.number().int().min(1_000).max(60_000).default(3_000),
+   DOCUMENT_STORAGE_DIR: optionalTrimmedString,
+   FIELD_ENCRYPTION_KEY: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
+@@ -98,6 +102,9 @@ const environmentSchema = z.object({
+   if (value.MOBILE_AUTH_MODE === "SMS" && (!value.MOBILE_AUTH_SECRET || !value.MOBILE_SMS_SEMAPHORE_API_KEY)) {
+     context.addIssue({ code: "custom", path: ["MOBILE_AUTH_MODE"], message: "SMS authentication requires a private mobile auth secret and Semaphore API key." });
+   }
++  if (value.MOBILE_PUSH_MODE === "EXPO" && (!value.MOBILE_AUTH_SECRET || !value.FIELD_ENCRYPTION_KEY)) {
++    context.addIssue({ code: "custom", path: ["MOBILE_PUSH_MODE"], message: "Expo push requires MOBILE_AUTH_SECRET and FIELD_ENCRYPTION_KEY to protect device tokens." });
++  }
+   const origins = value.CORS_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean);
+ 
+   if (origins.length === 0 || origins.includes("*")) {
+@@ -243,6 +250,10 @@ export const env = {
+   mobileSmsSemaphoreApiKey: parsedEnvironment.data.MOBILE_SMS_SEMAPHORE_API_KEY,
+   mobileSmsSenderName: parsedEnvironment.data.MOBILE_SMS_SENDER_NAME,
+   mobileSmsTimeoutMs: parsedEnvironment.data.MOBILE_SMS_TIMEOUT_MS,
++  mobilePushMode: parsedEnvironment.data.MOBILE_PUSH_MODE,
++  mobilePushExpoAccessToken: parsedEnvironment.data.MOBILE_PUSH_EXPO_ACCESS_TOKEN,
++  mobilePushTimeoutMs: parsedEnvironment.data.MOBILE_PUSH_TIMEOUT_MS,
++  mobilePushDispatchIntervalMs: parsedEnvironment.data.MOBILE_PUSH_DISPATCH_INTERVAL_MS,
+   documentStorageDir: parsedEnvironment.data.DOCUMENT_STORAGE_DIR,
+   fieldEncryptionKey: parsedEnvironment.data.FIELD_ENCRYPTION_KEY,
+   trustProxyHops: parsedEnvironment.data.TRUST_PROXY_HOPS,
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index 6ac842d..0276b05 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -15,7 +15,8 @@ import { getMobileWallet } from "./mobileWallet.service.js";
+ import { getMobileBiometrics, giveMobileBiometricConsent, revokeMobileBiometricConsent } from "./mobileBiometrics.service.js";
+ import { mobileBiometricConsentSchema, mobileBiometricConsentParamsSchema } from "./mobile.schemas.js";
+ import { getMobileNotifications, readMobileNotification, getMobileNotificationPreferences, updateMobileNotificationPreferences } from "./mobileNotifications.service.js";
+-import { mobileNotificationParamsSchema, mobileNotificationPreferencesSchema } from "./mobile.schemas.js";
++import { mobileNotificationParamsSchema, mobileNotificationPreferencesSchema, mobilePushDeviceSchema } from "./mobile.schemas.js";
++import { getMobilePushDevice, registerMobilePushDevice, removeMobilePushDevice } from "./mobilePush.service.js";
+ import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
+ import { mobileOtpRequestSchema, mobileOtpVerificationSchema, mobileProfileSchema, mobileRegistrationSchema } from "./mobile.schemas.js";
+ import { authenticateMobile, logoutMobile, mobileProfile, registerMobile, requestMobileOtp, updateMobileProfile, verifyMobileOtp } from "./mobile.service.js";
+@@ -80,6 +81,16 @@ mobileRoutes.get("/beneficiaries/me/notification-preferences", (req, res) => {
+ mobileRoutes.patch("/beneficiaries/me/notification-preferences", validateBody(mobileNotificationPreferencesSchema), asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await updateMobileNotificationPreferences(req.mobileSession, req.validatedBody) });
+ }));
++// Phone alerts are registered for the current session only; the token is never returned.
++mobileRoutes.get("/beneficiaries/me/push-device", asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobilePushDevice(req.mobileSession) });
++}));
++mobileRoutes.put("/beneficiaries/me/push-device", mobileAuthenticationRateLimiter, validateBody(mobilePushDeviceSchema), asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await registerMobilePushDevice(req.mobileSession, req.validatedBody) });
++}));
++mobileRoutes.delete("/beneficiaries/me/push-device", asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await removeMobilePushDevice(req.mobileSession) });
++}));
+ mobileRoutes.get("/beneficiaries/me/notifications", asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileNotifications(req.mobileSession) });
+ }));
+diff --git a/src/modules/mobile/mobile.schemas.js b/src/modules/mobile/mobile.schemas.js
+index f519c4d..63f7dd8 100644
+--- a/src/modules/mobile/mobile.schemas.js
++++ b/src/modules/mobile/mobile.schemas.js
+@@ -32,6 +32,12 @@ export const mobileNotificationParamsSchema = z.object({ notificationId: z.uuid(
+ export const mobileNotificationPreferencesSchema = z.object({
+   enrollmentUpdates: z.boolean(), scheduleUpdates: z.boolean(), claimUpdates: z.boolean(),
+ }).strict();
++// Expo push tokens travel only in this JSON body; messages never repeat the submitted value.
++export const mobilePushDeviceSchema = z.object({
++  token: z.string().regex(/^(?:Exponent|Expo)PushToken\[[A-Za-z0-9_-]{8,200}\]$/, "Use a valid Expo push token."),
++  platform: z.literal("android"),
++  language: z.enum(["en", "bs"]),
++}).strict();
+ export const mobileBiometricConsentSchema = z.object({ consentVersion: z.string().min(1).max(20),
+   retentionUntil: z.iso.datetime(), expectedConsentId: z.uuid().nullable() }).strict();
+ export const mobileBiometricConsentParamsSchema = z.object({ consentId: z.uuid() }).strict();
+diff --git a/src/modules/mobile/mobile.service.js b/src/modules/mobile/mobile.service.js
+index 9108873..d4dfaa7 100644
+--- a/src/modules/mobile/mobile.service.js
++++ b/src/modules/mobile/mobile.service.js
+@@ -212,6 +212,8 @@ export async function logoutMobile(session) {
+   await prisma.$transaction(async (tx) => {
+     const account = await lockedAccount(tx, session.accountId);
+     await tx.beneficiaryMobileSession.update({ where: { sessionId: session.sessionId }, data: { revokedAt: new Date() } });
++    // Signing out stops phone alerts for this session in the same commit (pending alerts cascade).
++    await tx.beneficiaryMobilePushDevice.deleteMany({ where: { sessionId: session.sessionId } });
+     await audit(tx, account, "MOBILE_SESSION_REVOKED");
+   });
+ }
+diff --git a/src/modules/mobile/mobileNotifications.service.js b/src/modules/mobile/mobileNotifications.service.js
+index 4ab71ee..389008b 100644
+--- a/src/modules/mobile/mobileNotifications.service.js
++++ b/src/modules/mobile/mobileNotifications.service.js
+@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
+ import prisma from "../../lib/prisma.js";
+ import { AppError } from "../../utils/AppError.js";
+ import { lockMobileSession } from "./mobile.service.js";
++import { mobilePushConfigured, queueMobilePushDeliveries } from "./mobilePush.service.js";
+ 
+ const preferenceSelect = { enrollmentUpdates: true, scheduleUpdates: true, claimUpdates: true };
+ const preferenceField = { account: "enrollmentUpdates", schedule: "scheduleUpdates", claim: "claimUpdates" };
+@@ -52,7 +53,22 @@ export async function createMobileNotifications(database, notifications) {
+   });
+   const preferences = new Map(accounts.map(account => [account.beneficiaryId, account]));
+   const enabled = rows.filter(row => preferences.get(row.beneficiaryId)?.[preferenceField[events[row.notificationType][0]]] !== false);
+-  if (enabled.length) await database.notification.createMany({ data: enabled, skipDuplicates: true });
++  if (!enabled.length) return;
++  const keys = enabled.map(row => row.deduplicationKey);
++  // Replayed staff actions keep their original notice and do not alert phones again.
++  const existing = mobilePushConfigured()
++    ? new Set((await database.notification.findMany({ where: { deduplicationKey: { in: keys } }, select: { deduplicationKey: true } })).map(row => row.deduplicationKey))
++    : new Set(keys);
++  await database.notification.createMany({ data: enabled, skipDuplicates: true });
++  const created = keys.filter(key => !existing.has(key));
++  if (created.length) await queueMobilePushDeliveries(database, await database.notification.findMany({
++    where: { deduplicationKey: { in: created }, channel: "IN_APP" }, select: { notificationId: true, beneficiaryId: true },
++  }), sentAt);
++}
++
++export function mobileNotificationPreferenceField(notificationType) {
++  const event = events[notificationType];
++  return event ? preferenceField[event[0]] : null;
+ }
+ 
+ function visibleWhere(session, now = new Date()) {
+diff --git a/src/modules/mobile/mobilePush.dispatcher.js b/src/modules/mobile/mobilePush.dispatcher.js
+new file mode 100644
+index 0000000..6abd33c
+--- /dev/null
++++ b/src/modules/mobile/mobilePush.dispatcher.js
+@@ -0,0 +1,233 @@
++import { randomUUID } from "node:crypto";
++import prisma from "../../lib/prisma.js";
++import { env } from "../../config/env.js";
++import { mobileNotificationPreferenceField } from "./mobileNotifications.service.js";
++import { MOBILE_PUSH_CHANNEL_ID, decryptPushToken, mobilePushConfigured } from "./mobilePush.service.js";
++import { EXPO_MAX_MESSAGES, EXPO_MAX_RECEIPTS, PushProviderError, getExpoPushReceipts, sendExpoPushMessages } from "./mobilePush.expo.js";
++
++export const MOBILE_PUSH_MAX_ATTEMPTS = 3;
++const LEASE_MS = 2 * 60_000;
++const RETRY_BASE_MS = 30_000;
++const RECEIPT_DELAY_MS = 15 * 60_000;
++const RECEIPT_RETENTION_MS = 24 * 60 * 60_000;
++const ALERT_MAX_AGE_MS = 24 * 60 * 60_000;
++const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60_000;
++const retryAt = (attemptCount, now) => new Date(now.getTime() + RETRY_BASE_MS * 2 ** (attemptCount - 1));
++
++// Lock-screen text is generic: no names, programs, amounts, places or staff notes.
++const copy = {
++  en: { title: "GarantiyAid", body: "You have a new account update. Open the app to view it." },
++  bs: { title: "GarantiyAid", body: "Naa kay bag-ong update sa imong account. Ablihi ang app aron makita kini." },
++};
++
++export function mobilePushMessage(token, notificationId, language) {
++  const text = copy[language] ?? copy.en;
++  return {
++    to: token, title: text.title, body: text.body,
++    data: { kind: "garantiyaid.notification", notificationId },
++    channelId: MOBILE_PUSH_CHANNEL_ID, priority: "high", ttl: 24 * 60 * 60,
++  };
++}
++
++function blockReason(row, now) {
++  const { device, notification } = row;
++  if (device.disabledAt) return "DEVICE_DISABLED";
++  const session = device.session;
++  if (session.revokedAt || session.expiresAt <= now || session.authMode !== env.mobileAuthMode) return "SESSION_INACTIVE";
++  const account = device.account;
++  if (!account.verifiedAt || account.beneficiary.status !== "ACTIVE") return "ACCOUNT_INACTIVE";
++  if (notification.beneficiaryId !== account.beneficiaryId) return "OWNER_CHANGED";
++  if (notification.channel !== "IN_APP" || !["SENT", "READ"].includes(notification.status)) return "NOTIFICATION_UNAVAILABLE";
++  if (notification.readAt) return "ALREADY_READ";
++  const preference = mobileNotificationPreferenceField(notification.notificationType);
++  if (!preference || account[preference] === false) return "PREFERENCE_DISABLED";
++  if (row.createdAt.getTime() < now.getTime() - ALERT_MAX_AGE_MS) return "ALERT_EXPIRED";
++  return null;
++}
++
++async function finish(database, deliveryId, processingToken, data) {
++  await database.beneficiaryMobilePushDelivery.updateMany({
++    where: { deliveryId, processingToken },
++    data: { ...data, processingToken: null, processingStartedAt: null },
++  });
++}
++
++async function disableDevice(database, deviceId, registrationId, reason, now) {
++  // Older pre-migration sends have no registration snapshot; they cannot invalidate a current token.
++  if (!registrationId) return false;
++  const changed = await database.beneficiaryMobilePushDevice.updateMany({
++    where: { deviceId, registrationId, disabledAt: null }, data: { disabledAt: now, disabledReason: reason },
++  });
++  if (!changed.count) return false;
++  await database.beneficiaryMobilePushDelivery.updateMany({
++    where: { deviceId, status: "PENDING", processingToken: null, device: { registrationId, disabledAt: { not: null } } },
++    data: { status: "CANCELLED", lastErrorCode: reason },
++  });
++  return true;
++}
++
++// One claimed batch: send outside any database transaction, then record each result only if
++// this dispatcher still owns the row. At-most-once: rows whose outcome is unknown are not resent.
++export async function dispatchMobilePushes({ database = prisma, sender = sendExpoPushMessages, now = new Date(), limit = EXPO_MAX_MESSAGES } = {}) {
++  const outcome = { claimed: 0, sent: 0, cancelled: 0, failed: 0, retrying: 0 };
++  if (!mobilePushConfigured()) return outcome;
++  const processingToken = randomUUID();
++  const claimed = await database.$queryRaw`
++    UPDATE "beneficiary_mobile_push_deliveries"
++       SET "processing_token" = ${processingToken}::uuid, "processing_started_at" = ${now},
++           "attempt_count" = "attempt_count" + 1, "updated_at" = ${now}
++     WHERE "delivery_id" IN (
++       SELECT "delivery_id" FROM "beneficiary_mobile_push_deliveries"
++        WHERE "status" = 'PENDING' AND "processing_token" IS NULL AND "next_attempt_at" <= ${now}
++          AND "attempt_count" < ${MOBILE_PUSH_MAX_ATTEMPTS}
++        ORDER BY "next_attempt_at", "created_at"
++        LIMIT ${Math.min(limit, EXPO_MAX_MESSAGES)}
++        FOR UPDATE SKIP LOCKED)
++    RETURNING "delivery_id"`;
++  outcome.claimed = claimed.length;
++  if (!claimed.length) return outcome;
++  const rows = await database.beneficiaryMobilePushDelivery.findMany({
++    where: { processingToken },
++    select: {
++      deliveryId: true, notificationId: true, attemptCount: true, createdAt: true,
++      notification: { select: { beneficiaryId: true, notificationType: true, channel: true, status: true, readAt: true } },
++      device: { select: {
++        deviceId: true, registrationId: true, tokenCiphertext: true, language: true, disabledAt: true,
++        session: { select: { revokedAt: true, expiresAt: true, authMode: true } },
++        account: { select: { beneficiaryId: true, verifiedAt: true, enrollmentUpdates: true, scheduleUpdates: true, claimUpdates: true,
++          beneficiary: { select: { status: true } } } },
++      } },
++    },
++  });
++  const ready = [];
++  for (const row of rows) {
++    const reason = blockReason(row, now);
++    if (reason) {
++      await finish(database, row.deliveryId, processingToken, { status: "CANCELLED", lastErrorCode: reason });
++      outcome.cancelled += 1;
++      continue;
++    }
++    let token;
++    try { token = decryptPushToken(row.device.tokenCiphertext, row.device.deviceId); } catch { token = null; }
++    if (!token) {
++      await finish(database, row.deliveryId, processingToken, { status: "CANCELLED", lastErrorCode: "TOKEN_UNREADABLE" });
++      await disableDevice(database, row.device.deviceId, row.device.registrationId, "TOKEN_UNREADABLE", now);
++      outcome.cancelled += 1;
++      continue;
++    }
++    ready.push({ row, message: mobilePushMessage(token, row.notificationId, row.device.language) });
++  }
++  if (!ready.length) return outcome;
++
++  let tickets;
++  try {
++    tickets = await sender(ready.map((item) => item.message));
++  } catch (error) {
++    const code = error instanceof PushProviderError ? error.code : "PUSH_PROVIDER_ERROR";
++    const retryable = error instanceof PushProviderError && error.retryable;
++    for (const { row } of ready) {
++      if (retryable && row.attemptCount < MOBILE_PUSH_MAX_ATTEMPTS) {
++        await finish(database, row.deliveryId, processingToken, {
++          lastErrorCode: code, nextAttemptAt: retryAt(row.attemptCount, now),
++        });
++        outcome.retrying += 1;
++      } else {
++        await finish(database, row.deliveryId, processingToken, { status: "FAILED", lastErrorCode: code });
++        outcome.failed += 1;
++      }
++    }
++    return outcome;
++  }
++
++  for (const [index, { row }] of ready.entries()) {
++    const ticket = tickets[index];
++    if (ticket.ok) {
++      await finish(database, row.deliveryId, processingToken, {
++        status: "SENT", sentAt: now, ticketId: ticket.ticketId, lastErrorCode: null, sentRegistrationId: row.device.registrationId,
++        receiptCheckAfter: new Date(now.getTime() + RECEIPT_DELAY_MS),
++      });
++      outcome.sent += 1;
++    } else if (ticket.errorCode === "MessageRateExceeded" && row.attemptCount < MOBILE_PUSH_MAX_ATTEMPTS) {
++      await finish(database, row.deliveryId, processingToken, { status: "PENDING", lastErrorCode: "PUSH_MessageRateExceeded", nextAttemptAt: retryAt(row.attemptCount, now) });
++      outcome.retrying += 1;
++    } else {
++      await finish(database, row.deliveryId, processingToken, { status: "FAILED", lastErrorCode: `PUSH_${ticket.errorCode}`.slice(0, 50) });
++      if (ticket.errorCode === "DeviceNotRegistered") await disableDevice(database, row.device.deviceId, row.device.registrationId, "DEVICE_NOT_REGISTERED", now);
++      outcome.failed += 1;
++    }
++  }
++  return outcome;
++}
++
++// Expo receipts arrive later and report tokens the phone no longer accepts.
++export async function checkMobilePushReceipts({ database = prisma, fetchReceipts = getExpoPushReceipts, now = new Date() } = {}) {
++  const outcome = { checked: 0, delivered: 0, errors: 0, invalidDevices: 0, retrying: 0 };
++  if (!mobilePushConfigured()) return outcome;
++  const processingToken = randomUUID();
++  const claimed = await database.$queryRaw`
++    UPDATE "beneficiary_mobile_push_deliveries"
++       SET "processing_token" = ${processingToken}::uuid, "processing_started_at" = ${now}, "updated_at" = ${now}
++     WHERE "delivery_id" IN (
++       SELECT "delivery_id" FROM "beneficiary_mobile_push_deliveries"
++        WHERE "status" = 'SENT' AND "receipt_status" IS NULL AND "ticket_id" IS NOT NULL
++          AND "receipt_check_after" <= ${now}
++          AND ("processing_token" IS NULL OR "processing_started_at" < ${new Date(now.getTime() - LEASE_MS)})
++        ORDER BY "receipt_check_after"
++        LIMIT ${EXPO_MAX_RECEIPTS}
++        FOR UPDATE SKIP LOCKED)
++    RETURNING "delivery_id", "ticket_id", "device_id", "sent_at", "sent_registration_id", "attempt_count"`;
++  if (!claimed.length) return outcome;
++  const later = new Date(now.getTime() + RECEIPT_DELAY_MS);
++  let receipts;
++  try {
++    receipts = await fetchReceipts(claimed.map((row) => row.ticket_id));
++  } catch {
++    for (const row of claimed) await finish(database, row.delivery_id, processingToken, { receiptCheckAfter: later });
++    return outcome;
++  }
++  for (const row of claimed) {
++    const receipt = receipts.get(row.ticket_id);
++    outcome.checked += 1;
++    if (!receipt) {
++      // Expo keeps receipts for 24 hours; after that the outcome is unknown rather than failed.
++      const expired = new Date(row.sent_at).getTime() < now.getTime() - RECEIPT_RETENTION_MS;
++      await finish(database, row.delivery_id, processingToken, expired ? { receiptStatus: "UNAVAILABLE" } : { receiptCheckAfter: later });
++    } else if (receipt.ok) {
++      await finish(database, row.delivery_id, processingToken, { receiptStatus: "OK" });
++      outcome.delivered += 1;
++    } else if (receipt.errorCode === "MessageRateExceeded" && row.attempt_count < MOBILE_PUSH_MAX_ATTEMPTS) {
++      // Expo accepted the request but the device provider rejected delivery; retry only this alert.
++      await finish(database, row.delivery_id, processingToken, {
++        status: "PENDING", nextAttemptAt: retryAt(row.attempt_count, now), lastErrorCode: "PUSH_MessageRateExceeded",
++        ticketId: null, sentAt: null, sentRegistrationId: null, receiptCheckAfter: null, receiptStatus: null,
++      });
++      outcome.retrying += 1;
++    } else {
++      await finish(database, row.delivery_id, processingToken, { receiptStatus: "ERROR", lastErrorCode: `PUSH_${receipt.errorCode}`.slice(0, 50) });
++      if (receipt.errorCode === "DeviceNotRegistered") {
++        if (await disableDevice(database, row.device_id, row.sent_registration_id, "DEVICE_NOT_REGISTERED", now)) outcome.invalidDevices += 1;
++      }
++      outcome.errors += 1;
++    }
++  }
++  return outcome;
++}
++
++// Housekeeping: unknown in-flight sends are failed (not resent), and inactive sessions lose their tokens.
++export async function sweepMobilePushes({ database = prisma, now = new Date() } = {}) {
++  const stale = await database.beneficiaryMobilePushDelivery.updateMany({
++    where: { status: "PENDING", processingToken: { not: null }, processingStartedAt: { lt: new Date(now.getTime() - LEASE_MS) } },
++    data: { status: "FAILED", lastErrorCode: "PUSH_RESULT_UNKNOWN", processingToken: null, processingStartedAt: null },
++  });
++  const exhausted = await database.beneficiaryMobilePushDelivery.updateMany({
++    where: { status: "PENDING", processingToken: null, attemptCount: { gte: MOBILE_PUSH_MAX_ATTEMPTS } },
++    data: { status: "FAILED", lastErrorCode: "PUSH_ATTEMPTS_EXHAUSTED" },
++  });
++  const inactiveDevices = await database.beneficiaryMobilePushDevice.deleteMany({
++    where: { session: { OR: [{ revokedAt: { not: null } }, { expiresAt: { lte: now } }] } },
++  });
++  const oldHistory = await database.beneficiaryMobilePushDelivery.deleteMany({
++    where: { status: { not: "PENDING" }, updatedAt: { lt: new Date(now.getTime() - HISTORY_RETENTION_MS) } },
++  });
++  return { stale: stale.count, exhausted: exhausted.count, inactiveDevices: inactiveDevices.count, oldHistory: oldHistory.count };
++}
+diff --git a/src/modules/mobile/mobilePush.expo.js b/src/modules/mobile/mobilePush.expo.js
+new file mode 100644
+index 0000000..7d5fe04
+--- /dev/null
++++ b/src/modules/mobile/mobilePush.expo.js
+@@ -0,0 +1,82 @@
++import { env } from "../../config/env.js";
++
++// Expo Push Service (https://docs.expo.dev/push-notifications/sending-notifications/).
++const SEND_URL = "https://exp.host/--/api/v2/push/send";
++const RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts";
++export const EXPO_MAX_MESSAGES = 100;
++export const EXPO_MAX_RECEIPTS = 1000;
++
++export class PushProviderError extends Error {
++  constructor(code, retryable) {
++    super("The push provider request failed.");
++    this.name = "PushProviderError";
++    this.code = code;
++    this.retryable = retryable;
++  }
++}
++
++// Provider messages can echo device tokens. Only short, known-shaped codes ever leave this module.
++function providerCode(value, fallback) {
++  return typeof value === "string" && /^[A-Za-z_]{3,40}$/.test(value) ? value : fallback;
++}
++
++async function post(url, body, fetchImpl) {
++  const controller = new AbortController();
++  const timer = setTimeout(() => controller.abort(), env.mobilePushTimeoutMs);
++  try {
++    const response = await fetchImpl(url, {
++      method: "POST",
++      signal: controller.signal,
++      headers: {
++        Accept: "application/json",
++        "Content-Type": "application/json",
++        ...(env.mobilePushExpoAccessToken ? { Authorization: `Bearer ${env.mobilePushExpoAccessToken}` } : {}),
++      },
++      body: JSON.stringify(body),
++    });
++    // Keep the deadline active until the body is consumed, not just until headers arrive.
++    if (response.status === 429 || response.status >= 500) throw new PushProviderError(`PUSH_PROVIDER_HTTP_${response.status}`, true);
++    let payload;
++    try { payload = await response.json(); } catch (error) {
++      if (controller.signal.aborted) throw error;
++      payload = null;
++    }
++    if (!response.ok || !payload || !("data" in payload)) {
++      const code = providerCode(payload?.errors?.[0]?.code, `HTTP_${response.status}`);
++      throw new PushProviderError(`PUSH_PROVIDER_${code}`.slice(0, 50), false);
++    }
++    return payload.data;
++  } catch (error) {
++    if (error instanceof PushProviderError) throw error;
++    // A timeout may happen after Expo accepted the batch, so it is not retried (no duplicate alerts).
++    const timedOut = controller.signal.aborted || error?.name === "AbortError" || error?.name === "TimeoutError";
++    throw new PushProviderError(timedOut ? "PUSH_PROVIDER_TIMEOUT" : "PUSH_PROVIDER_UNREACHABLE", !timedOut);
++  } finally {
++    clearTimeout(timer);
++  }
++}
++
++export async function sendExpoPushMessages(messages, { fetchImpl = fetch } = {}) {
++  if (messages.length > EXPO_MAX_MESSAGES) throw new RangeError("Expo accepts at most 100 messages per request.");
++  const tickets = await post(SEND_URL, messages, fetchImpl);
++  if (!Array.isArray(tickets) || tickets.length !== messages.length) {
++    throw new PushProviderError("PUSH_PROVIDER_INVALID_RESPONSE", false);
++  }
++  return tickets.map((ticket) => ticket?.status === "ok" && typeof ticket.id === "string"
++    ? { ok: true, ticketId: ticket.id.slice(0, 100) }
++    : { ok: false, errorCode: providerCode(ticket?.details?.error, "PushTicketError") });
++}
++
++export async function getExpoPushReceipts(ticketIds, { fetchImpl = fetch } = {}) {
++  if (ticketIds.length > EXPO_MAX_RECEIPTS) throw new RangeError("Expo accepts at most 1000 receipt IDs per request.");
++  const data = await post(RECEIPTS_URL, { ids: ticketIds }, fetchImpl);
++  const receipts = new Map();
++  for (const id of ticketIds) {
++    const receipt = data?.[id];
++    if (!receipt) continue;
++    receipts.set(id, receipt.status === "ok"
++      ? { ok: true }
++      : { ok: false, errorCode: providerCode(receipt.details?.error, "PushReceiptError") });
++  }
++  return receipts;
++}
+diff --git a/src/modules/mobile/mobilePush.service.js b/src/modules/mobile/mobilePush.service.js
+new file mode 100644
+index 0000000..c8fafc9
+--- /dev/null
++++ b/src/modules/mobile/mobilePush.service.js
+@@ -0,0 +1,129 @@
++import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from "node:crypto";
++import prisma from "../../lib/prisma.js";
++import { env } from "../../config/env.js";
++import { AppError } from "../../utils/AppError.js";
++import { lockMobileSession } from "./mobile.service.js";
++
++export const MOBILE_PUSH_CHANNEL_ID = "account-updates";
++
++export function mobilePushConfigured() {
++  return env.mobilePushMode === "EXPO" && Boolean(env.mobileAuthSecret)
++    && /^[0-9a-fA-F]{64}$/.test(env.fieldEncryptionKey ?? "");
++}
++
++function requirePush() {
++  if (!mobilePushConfigured()) {
++    throw new AppError(503, "PUSH_UNAVAILABLE", "Phone alerts are not configured on this server. In-app notifications remain available.");
++  }
++}
++
++// The keyed hash finds a physical device without storing or comparing the raw provider token.
++function tokenHash(token) {
++  return createHmac("sha256", env.mobileAuthSecret).update(`mobile-push-token:${token}`).digest("hex");
++}
++
++function tokenKey() {
++  return Buffer.from(env.fieldEncryptionKey, "hex");
++}
++
++export function encryptPushToken(token, deviceId) {
++  const iv = randomBytes(12);
++  const cipher = createCipheriv("aes-256-gcm", tokenKey(), iv);
++  cipher.setAAD(Buffer.from(`mobile-push-device:${deviceId}`));
++  const ciphertext = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
++  return [iv, cipher.getAuthTag(), ciphertext].map((part) => part.toString("base64url")).join(".");
++}
++
++export function decryptPushToken(value, deviceId) {
++  const [iv, tag, ciphertext] = String(value).split(".").map((part) => Buffer.from(part, "base64url"));
++  const decipher = createDecipheriv("aes-256-gcm", tokenKey(), iv);
++  decipher.setAAD(Buffer.from(`mobile-push-device:${deviceId}`));
++  decipher.setAuthTag(tag);
++  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
++}
++
++// Never includes the token, its hash, or another session's details.
++function publicDevice(device) {
++  const status = !mobilePushConfigured() ? "unavailable" : !device ? "off" : device.disabledAt ? "invalid" : "on";
++  return {
++    configured: mobilePushConfigured(),
++    status,
++    enabled: status === "on",
++    language: device?.language ?? null,
++    updatedAt: device?.updatedAt?.toISOString() ?? null,
++  };
++}
++
++const deviceSelect = { deviceId: true, language: true, disabledAt: true, updatedAt: true };
++
++async function audit(database, beneficiaryId, action) {
++  await database.auditLog.create({ data: {
++    actorType: "BENEFICIARY", action, entityAffected: "BENEFICIARY", recordId: beneficiaryId,
++    details: { source: "MOBILE_APP", platform: "android" },
++  } });
++}
++
++export async function getMobilePushDevice(session) {
++  const device = await prisma.beneficiaryMobilePushDevice.findUnique({ where: { sessionId: session.sessionId }, select: deviceSelect });
++  return publicDevice(device);
++}
++
++export async function registerMobilePushDevice(session, { token, platform, language }) {
++  requirePush();
++  const hash = tokenHash(token);
++  try {
++    return await prisma.$transaction(async (tx) => {
++      const account = await lockMobileSession(tx, session);
++      // One owner per physical device: moving the token here stops delivery to its previous session or account.
++      const previous = await tx.beneficiaryMobilePushDevice.findUnique({
++        where: { tokenHash: hash }, select: { deviceId: true, sessionId: true, account: { select: { beneficiaryId: true } } },
++      });
++      if (previous && previous.sessionId !== session.sessionId) {
++        await tx.beneficiaryMobilePushDevice.delete({ where: { deviceId: previous.deviceId } });
++        if (previous.account.beneficiaryId !== account.beneficiaryId) await audit(tx, previous.account.beneficiaryId, "MOBILE_PUSH_DEVICE_REASSIGNED");
++      }
++      const current = await tx.beneficiaryMobilePushDevice.findUnique({ where: { sessionId: session.sessionId }, select: { deviceId: true } });
++      const deviceId = current?.deviceId ?? randomUUID();
++      const data = { registrationId: randomUUID(), tokenHash: hash, tokenCiphertext: encryptPushToken(token, deviceId), platform, language, disabledAt: null, disabledReason: null };
++      const device = current
++        ? await tx.beneficiaryMobilePushDevice.update({ where: { deviceId }, data, select: deviceSelect })
++        : await tx.beneficiaryMobilePushDevice.create({ data: { deviceId, accountId: account.accountId, sessionId: session.sessionId, ...data }, select: deviceSelect });
++      await audit(tx, account.beneficiaryId, "MOBILE_PUSH_DEVICE_REGISTERED");
++      return publicDevice(device);
++    });
++  } catch (error) {
++    // Two sessions registering the same device at once: the loser retries against the saved owner.
++    if (error.code === "P2002") throw new AppError(409, "PUSH_DEVICE_CHANGED", "This phone's alert registration changed. Try again.");
++    throw error;
++  }
++}
++
++export async function removeMobilePushDevice(session) {
++  return prisma.$transaction(async (tx) => {
++    const account = await lockMobileSession(tx, session);
++    const removed = await tx.beneficiaryMobilePushDevice.deleteMany({ where: { sessionId: session.sessionId } });
++    if (removed.count) await audit(tx, account.beneficiaryId, "MOBILE_PUSH_DEVICE_REMOVED");
++    return publicDevice(null);
++  });
++}
++
++// Runs inside the staff transaction: only database rows are written here. The dispatcher sends
++// after commit, so a rolled-back staff action never produces a phone alert.
++export async function queueMobilePushDeliveries(database, notifications, now = new Date()) {
++  if (!mobilePushConfigured() || !notifications.length) return 0;
++  const beneficiaryIds = [...new Set(notifications.map((row) => row.beneficiaryId))];
++  const devices = await database.beneficiaryMobilePushDevice.findMany({
++    where: {
++      disabledAt: null,
++      account: { beneficiaryId: { in: beneficiaryIds }, verifiedAt: { not: null } },
++      session: { revokedAt: null, expiresAt: { gt: now }, authMode: env.mobileAuthMode },
++    },
++    select: { deviceId: true, account: { select: { beneficiaryId: true } } },
++  });
++  const data = notifications.flatMap((notification) => devices
++    .filter((device) => device.account.beneficiaryId === notification.beneficiaryId)
++    .map((device) => ({ notificationId: notification.notificationId, deviceId: device.deviceId, nextAttemptAt: now })));
++  if (!data.length) return 0;
++  // The (notification, device) unique key prevents duplicate alerts from staff retries and replays.
++  return (await database.beneficiaryMobilePushDelivery.createMany({ data, skipDuplicates: true })).count;
++}
+diff --git a/src/server.js b/src/server.js
+index 690a087..04c3dc4 100644
+--- a/src/server.js
++++ b/src/server.js
+@@ -9,6 +9,7 @@ import { startAssistantHistoryCleanup } from "./modules/chatbot/assistantHistory
+ import { startBeneficiaryImportWorker } from "./workers/beneficiaryImport.worker.js";
+ import { startProgramImportWorker } from "./workers/programImport.worker.js";
+ import { startStaffImportWorker } from "./workers/staffImport.worker.js";
++import { startMobilePushDispatcher } from "./workers/mobilePush.worker.js";
+ import {
+   closeNotificationRealtimeSubscriber,
+   startNotificationRealtimeSubscriber,
+@@ -32,6 +33,7 @@ server.listen(env.port, () => {
+   // A second instance must not process jobs before it can own the API port.
+   void startNotificationRealtimeSubscriber();
+   stopWorkers.push(startProgramImportWorker(), startStaffImportWorker(), startBeneficiaryImportWorker(), startAssistantHistoryCleanup());
++  if (env.mobilePushMode === "EXPO") stopWorkers.push(startMobilePushDispatcher());
+   console.log(`GarantiyAid API listening on port ${env.port}.`);
+ });
+ 
+diff --git a/src/workers/mobilePush.worker.js b/src/workers/mobilePush.worker.js
+new file mode 100644
+index 0000000..8b7baa2
+--- /dev/null
++++ b/src/workers/mobilePush.worker.js
+@@ -0,0 +1,30 @@
++import prisma from "../lib/prisma.js";
++import { env } from "../config/env.js";
++import { checkMobilePushReceipts, dispatchMobilePushes, sweepMobilePushes } from "../modules/mobile/mobilePush.dispatcher.js";
++
++// Polls the committed push outbox. Uncommitted staff transactions are invisible here, so alerts
++// are only sent after commit. Database claims let several API instances share the work safely.
++export function startMobilePushDispatcher({ database = prisma, intervalMs = env.mobilePushDispatchIntervalMs } = {}) {
++  let stopping = false;
++  let timer;
++  let pending = Promise.resolve();
++  let lastHousekeeping = 0;
++  async function tick() {
++    try {
++      if (Date.now() - lastHousekeeping > 60_000) {
++        await sweepMobilePushes({ database });
++        lastHousekeeping = Date.now();
++      }
++      let batch;
++      do { batch = await dispatchMobilePushes({ database }); } while (!stopping && batch.claimed > 0);
++      await checkMobilePushReceipts({ database });
++    } catch (error) {
++      // Codes only: provider and device details never reach logs.
++      console.warn({ event: "MOBILE_PUSH_DISPATCH_UNAVAILABLE", errorCode: error.code ?? "DATABASE_UNAVAILABLE" });
++    } finally {
++      if (!stopping) { timer = setTimeout(() => { pending = tick(); }, intervalMs); timer.unref?.(); }
++    }
++  }
++  pending = tick();
++  return async () => { stopping = true; clearTimeout(timer); await pending; };
++}
+diff --git a/test/mobile-push.integration.js b/test/mobile-push.integration.js
+new file mode 100644
+index 0000000..87590d1
+--- /dev/null
++++ b/test/mobile-push.integration.js
+@@ -0,0 +1,277 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { randomInt, randomUUID } from "node:crypto";
++import { once } from "node:events";
++
++// Explicit opt-in: uses the isolated migrated test database and a fake push provider. No real push is sent.
++test("phone alerts are per-session opt-ins, sent once after commit, and stop on logout, account change or invalid tokens", {
++  skip: process.env.RUN_MOBILE_DB_TESTS !== "1",
++}, async () => {
++  process.env.AUTH_RATE_LIMIT_PER_15_MINUTES = "100";
++  const [{ default: app }, { default: prisma }, { env }, notifications, dispatcher, { PushProviderError }] = await Promise.all([
++    import("../src/app.js"), import("../src/lib/prisma.js"), import("../src/config/env.js"),
++    import("../src/modules/mobile/mobileNotifications.service.js"), import("../src/modules/mobile/mobilePush.dispatcher.js"),
++    import("../src/modules/mobile/mobilePush.expo.js"),
++  ]);
++  const { createMobileNotifications } = notifications;
++  const { dispatchMobilePushes, checkMobilePushReceipts, sweepMobilePushes } = dispatcher;
++  const savedMode = env.mobilePushMode;
++  env.mobilePushMode = "EXPO";
++  const logged = [];
++  const original = { log: console.log, warn: console.warn, error: console.error, info: console.info };
++  for (const level of Object.keys(original)) console[level] = (...args) => { logged.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" ")); };
++  const server = app.listen(0, "127.0.0.1");
++  await once(server, "listening");
++  const base = `http://127.0.0.1:${server.address().port}/api/v1/mobile`;
++  const barangayId = randomUUID();
++  const ids = [];
++  const tokens = ["ExponentPushToken[synthetic-phone-a1]", "ExponentPushToken[synthetic-phone-b2]", "ExponentPushToken[synthetic-phone-c3]"];
++  const request = async (path, { token, body, method = body ? "POST" : "GET" } = {}) => {
++    const response = await fetch(base + path, { method,
++      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { "Content-Type": "application/json" } : {}) },
++      ...(body ? { body: JSON.stringify(body) } : {}) });
++    const text = await response.text();
++    return { status: response.status, text, body: text ? JSON.parse(text) : null, headers: response.headers };
++  };
++  const signUp = async (lastName) => {
++    const contactNumber = `+639${randomInt(100_000_000, 1_000_000_000)}`;
++    const registered = (await request("/auth/register", { body: { firstName: "Push", middleName: "", lastName, birthDate: "1991-02-03", sex: "female", address: "7 Synthetic Street", barangayId, contactNumber } })).body.data;
++    ids.push(registered.beneficiary.id);
++    const login = (await request("/auth/otp/verify", { body: { contactNumber, purpose: "register", code: registered.developmentOtp } })).body.data;
++    return { beneficiaryId: registered.beneficiary.id, accessToken: login.accessToken, contactNumber };
++  };
++  const enable = (person, token, language = "en") => request("/beneficiaries/me/push-device", { method: "PUT", token: person.accessToken, body: { token, platform: "android", language } });
++  const notify = (beneficiaryId, type = "ENROLLMENT_APPROVED", reference = randomUUID()) =>
++    prisma.$transaction((tx) => createMobileNotifications(tx, [{ beneficiaryId, type, reference }]));
++  const deliveries = (beneficiaryId) => prisma.beneficiaryMobilePushDelivery.findMany({ where: { notification: { beneficiaryId } }, orderBy: { createdAt: "asc" } });
++  const sent = [];
++  const okSender = async (messages) => { sent.push(...messages); return messages.map((_message, index) => ({ ok: true, ticketId: `ticket-${sent.length - messages.length + index}` })); };
++  try {
++    await prisma.barangay.create({ data: { barangayId, barangayCode: barangayId.slice(0, 20), barangayName: "Push integration test", city: "Test", province: "Test" } });
++    const first = await signUp("Alpha");
++    const second = await signUp("Bravo");
++
++    // Opt-in state is private, per session, and starts off.
++    assert.equal((await request("/beneficiaries/me/push-device")).status, 401);
++    const initial = await request("/beneficiaries/me/push-device", { token: first.accessToken });
++    assert.equal(initial.headers.get("cache-control"), "private, no-store");
++    assert.deepEqual(initial.body.data, { configured: true, status: "off", enabled: false, language: null, updatedAt: null });
++    for (const body of [{ token: "not-a-token", platform: "android", language: "en" }, { token: tokens[0], platform: "ios", language: "en" }, { token: tokens[0], platform: "android", language: "en", accountId: randomUUID() }]) {
++      const invalid = await request("/beneficiaries/me/push-device", { method: "PUT", token: first.accessToken, body });
++      assert.equal(invalid.status, 400);
++      assert.ok(!invalid.text.includes("not-a-token") && !invalid.text.includes("synthetic-phone"));
++    }
++    const enabled = await enable(first, tokens[0], "bs");
++    assert.equal(enabled.status, 200);
++    assert.equal(enabled.body.data.status, "on");
++    assert.equal(enabled.body.data.language, "bs");
++    assert.ok(!enabled.text.includes("PushToken"), "The token is never returned");
++    const [saved] = await prisma.beneficiaryMobilePushDevice.findMany({ where: { account: { beneficiaryId: first.beneficiaryId } } });
++    assert.ok(!saved.tokenCiphertext.includes("synthetic-phone") && !saved.tokenHash.includes("synthetic"));
++    assert.equal((await request("/beneficiaries/me/push-device", { token: second.accessToken })).body.data.status, "off", "Another account does not see this phone");
++
++    // Rolled-back staff work leaves no notice or alert; committed work queues exactly one alert per event.
++    const rolledBack = randomUUID();
++    await assert.rejects(prisma.$transaction(async (tx) => {
++      await createMobileNotifications(tx, [{ beneficiaryId: first.beneficiaryId, type: "ENROLLMENT_APPROVED", reference: rolledBack }]);
++      throw new Error("Synthetic staff failure");
++    }), /Synthetic staff failure/);
++    assert.equal((await deliveries(first.beneficiaryId)).length, 0);
++    assert.equal(await prisma.notification.count({ where: { beneficiaryId: first.beneficiaryId } }), 0);
++    const reference = randomUUID();
++    await notify(first.beneficiaryId, "ENROLLMENT_APPROVED", reference);
++    await notify(first.beneficiaryId, "ENROLLMENT_APPROVED", reference);
++    assert.equal((await deliveries(first.beneficiaryId)).length, 1, "A replayed staff action does not alert twice");
++    assert.equal((await deliveries(second.beneficiaryId)).length, 0);
++
++    let outcome = await dispatchMobilePushes({ sender: okSender });
++    assert.equal(outcome.sent, 1);
++    const [notice] = await prisma.notification.findMany({ where: { beneficiaryId: first.beneficiaryId } });
++    assert.deepEqual(sent[0], { to: tokens[0], title: "GarantiyAid", body: "Naa kay bag-ong update sa imong account. Ablihi ang app aron makita kini.",
++      data: { kind: "garantiyaid.notification", notificationId: notice.notificationId }, channelId: "account-updates", priority: "high", ttl: 86_400 });
++    assert.ok(!JSON.stringify(sent[0]).match(/Push |Alpha|enrollment|approved/i), "Lock-screen text carries no personal or program details");
++    outcome = await dispatchMobilePushes({ sender: okSender });
++    assert.equal(outcome.claimed, 0, "A sent alert is never claimed again");
++    assert.equal(sent.length, 1);
++
++    // Receipts: delivered, then an unregistered device is disabled and stops queueing.
++    const [delivered] = await deliveries(first.beneficiaryId);
++    assert.equal(delivered.status, "SENT");
++    assert.equal(delivered.ticketId, "ticket-0");
++    const later = new Date(Date.now() + 16 * 60_000);
++    assert.equal((await checkMobilePushReceipts({ now: later, fetchReceipts: async (receiptIds) => new Map(receiptIds.map((id) => [id, { ok: true }])) })).delivered, 1);
++    assert.equal((await prisma.beneficiaryMobilePushDelivery.findUnique({ where: { deliveryId: delivered.deliveryId } })).receiptStatus, "OK");
++
++    // Saved preferences and read state still apply at send time.
++    await notify(first.beneficiaryId, "SCHEDULE_PUBLISHED");
++    await prisma.beneficiaryMobileAccount.update({ where: { beneficiaryId: first.beneficiaryId }, data: { scheduleUpdates: false } });
++    await notify(first.beneficiaryId, "ENROLLMENT_REJECTED");
++    const readable = (await prisma.notification.findMany({ where: { beneficiaryId: first.beneficiaryId, notificationType: "ENROLLMENT_REJECTED" } }))[0];
++    assert.equal((await request(`/beneficiaries/me/notifications/${readable.notificationId}/read`, { method: "PATCH", token: first.accessToken })).status, 200);
++    outcome = await dispatchMobilePushes({ sender: okSender });
++    assert.equal(outcome.cancelled, 2);
++    assert.deepEqual((await deliveries(first.beneficiaryId)).slice(1).map((row) => row.lastErrorCode).sort(), ["ALREADY_READ", "PREFERENCE_DISABLED"]);
++    await notify(first.beneficiaryId, "SCHEDULE_PUBLISHED");
++    assert.equal((await deliveries(first.beneficiaryId)).length, 3, "A disabled category creates no notice and no alert");
++    await prisma.beneficiaryMobileAccount.update({ where: { beneficiaryId: first.beneficiaryId }, data: { scheduleUpdates: true } });
++
++    // Retryable provider failures back off and stop after three attempts; timeouts are never resent.
++    await notify(first.beneficiaryId, "CLAIM_VERIFIED");
++    const busy = async () => { throw new PushProviderError("PUSH_PROVIDER_HTTP_503", true); };
++    let clock = new Date();
++    assert.equal((await dispatchMobilePushes({ sender: busy, now: clock })).retrying, 1);
++    let retry = (await deliveries(first.beneficiaryId)).at(-1);
++    assert.equal(retry.status, "PENDING");
++    assert.ok(retry.nextAttemptAt > clock);
++    assert.equal((await dispatchMobilePushes({ sender: busy, now: clock })).claimed, 0, "Backoff is respected");
++    for (const attempt of [2, 3]) {
++      clock = new Date(retry.nextAttemptAt.getTime() + 1);
++      await dispatchMobilePushes({ sender: busy, now: clock });
++      retry = (await deliveries(first.beneficiaryId)).at(-1);
++      assert.equal(retry.attemptCount, attempt);
++    }
++    assert.equal(retry.status, "FAILED");
++    assert.equal(retry.lastErrorCode, "PUSH_PROVIDER_HTTP_503");
++    await notify(first.beneficiaryId, "ASSISTANCE_RELEASED");
++    assert.equal((await dispatchMobilePushes({ sender: async () => { throw new PushProviderError("PUSH_PROVIDER_TIMEOUT", false); } })).failed, 1);
++    assert.equal((await deliveries(first.beneficiaryId)).at(-1).attemptCount, 1);
++
++    // An outcome lost mid-send is marked unknown instead of being resent.
++    await notify(first.beneficiaryId, "CLAIM_VERIFIED");
++    const inFlight = (await deliveries(first.beneficiaryId)).at(-1);
++    await prisma.beneficiaryMobilePushDelivery.update({ where: { deliveryId: inFlight.deliveryId }, data: { processingToken: randomUUID(), processingStartedAt: new Date(Date.now() - 3 * 60_000), attemptCount: 1 } });
++    assert.equal((await dispatchMobilePushes({ sender: okSender })).claimed, 0);
++    assert.equal((await sweepMobilePushes()).stale, 1);
++    assert.equal((await prisma.beneficiaryMobilePushDelivery.findUnique({ where: { deliveryId: inFlight.deliveryId } })).lastErrorCode, "PUSH_RESULT_UNKNOWN");
++
++    // Expo reports the token as no longer registered: the device is disabled and the app is told to re-enable.
++    await notify(first.beneficiaryId, "BENEFIT_CREDITED_SIMULATED");
++    await dispatchMobilePushes({ sender: async (messages) => messages.map(() => ({ ok: false, errorCode: "DeviceNotRegistered" })) });
++    assert.equal((await request("/beneficiaries/me/push-device", { token: first.accessToken })).body.data.status, "invalid");
++    const before = (await deliveries(first.beneficiaryId)).length;
++    await notify(first.beneficiaryId, "ENROLLMENT_FOR_VALIDATION");
++    assert.equal((await deliveries(first.beneficiaryId)).length, before, "Disabled devices receive no new alerts");
++    assert.equal((await enable(first, tokens[0])).body.data.status, "on", "Re-enabling replaces the invalid registration");
++
++    // Signing in to another account on the same phone moves the device; the previous account stops receiving alerts.
++    assert.equal((await enable(second, tokens[0])).body.data.status, "on");
++    assert.equal((await request("/beneficiaries/me/push-device", { token: first.accessToken })).body.data.status, "off");
++    const firstBefore = (await deliveries(first.beneficiaryId)).length;
++    await notify(first.beneficiaryId, "ENROLLMENT_NEEDS_CORRECTION");
++    await notify(second.beneficiaryId, "ENROLLMENT_NEEDS_CORRECTION");
++    assert.equal((await deliveries(first.beneficiaryId)).length, firstBefore);
++    assert.equal((await deliveries(second.beneficiaryId)).length, 1);
++    sent.length = 0;
++    await dispatchMobilePushes({ sender: okSender });
++    assert.equal(sent.length, 1);
++    assert.equal(sent[0].to, tokens[0]);
++    assert.equal(sent[0].body, "You have a new account update. Open the app to view it.");
++    assert.ok(await prisma.auditLog.findFirst({ where: { recordId: first.beneficiaryId, action: "MOBILE_PUSH_DEVICE_REASSIGNED" } }));
++
++    // Turning alerts off or signing out removes the registration and any queued alerts in the same commit.
++    assert.equal((await enable(first, tokens[1])).status, 200);
++    await notify(first.beneficiaryId, "SCHEDULE_PUBLISHED");
++    assert.equal((await request("/beneficiaries/me/push-device", { method: "DELETE", token: first.accessToken })).body.data.status, "off");
++    assert.equal(await prisma.beneficiaryMobilePushDevice.count({ where: { account: { beneficiaryId: first.beneficiaryId } } }), 0);
++    assert.equal((await deliveries(first.beneficiaryId)).filter((row) => row.status === "PENDING").length, 0);
++    await notify(second.beneficiaryId, "SCHEDULE_PUBLISHED");
++    assert.equal((await request("/auth/logout", { method: "POST", token: second.accessToken, body: {} })).status, 204);
++    assert.equal(await prisma.beneficiaryMobilePushDevice.count({ where: { account: { beneficiaryId: second.beneficiaryId } } }), 0);
++    assert.equal((await deliveries(second.beneficiaryId)).filter((row) => row.status === "PENDING").length, 0);
++    await notify(second.beneficiaryId, "CLAIM_VERIFIED");
++    assert.equal((await dispatchMobilePushes({ sender: okSender })).claimed, 0, "A signed-out phone receives nothing");
++
++    // A delayed receipt for a replaced registration cannot invalidate the fresh token or its queued alerts.
++    await enable(first, tokens[1]);
++    await notify(first.beneficiaryId, "CLAIM_VERIFIED");
++    await dispatchMobilePushes({ sender: okSender });
++    const previousRegistration = (await prisma.beneficiaryMobilePushDevice.findMany({ where: { account: { beneficiaryId: first.beneficiaryId } } }))[0];
++    assert.equal((await enable(first, tokens[2])).status, 200);
++    const replacement = await prisma.beneficiaryMobilePushDevice.findUnique({ where: { deviceId: previousRegistration.deviceId } });
++    assert.notEqual(replacement.registrationId, previousRegistration.registrationId);
++    await notify(first.beneficiaryId, "ASSISTANCE_RELEASED");
++    const receiptTime = new Date(Date.now() + 16 * 60_000);
++    const staleReceipt = await checkMobilePushReceipts({ now: receiptTime,
++      fetchReceipts: async ids => new Map(ids.map(id => [id, { ok: false, errorCode: "DeviceNotRegistered" }])) });
++    assert.equal(staleReceipt.invalidDevices, 0);
++    assert.equal((await request("/beneficiaries/me/push-device", { token: first.accessToken })).body.data.status, "on");
++    assert.equal((await dispatchMobilePushes({ sender: okSender })).sent, 1, "Replacement registration still receives queued updates");
++    await checkMobilePushReceipts({ now: receiptTime, fetchReceipts: async ids => new Map(ids.map(id => [id, { ok: true }])) });
++
++    // A token replaced while the provider request is in flight is protected from that request's error too.
++    await notify(first.beneficiaryId, "CLAIM_VERIFIED");
++    await dispatchMobilePushes({ sender: async messages => {
++      await enable(first, tokens[1]);
++      return messages.map(() => ({ ok: false, errorCode: "DeviceNotRegistered" }));
++    } });
++    assert.equal((await request("/beneficiaries/me/push-device", { token: first.accessToken })).body.data.status, "on");
++
++    // Per-device rate limits retry only the affected notification with backoff and a bounded send count.
++    await notify(first.beneficiaryId, "ENROLLMENT_APPROVED");
++    const rateLimitedId = (await deliveries(first.beneficiaryId)).at(-1).deliveryId;
++    clock = new Date();
++    assert.equal((await dispatchMobilePushes({ now: clock, sender: async messages => messages.map(() => ({ ok: false, errorCode: "MessageRateExceeded" })) })).retrying, 1);
++    const limited = () => prisma.beneficiaryMobilePushDelivery.findUnique({ where: { deliveryId: rateLimitedId } });
++    retry = await limited();
++    assert.equal(retry.status, "PENDING");
++    assert.ok(retry.nextAttemptAt > clock);
++    assert.equal((await dispatchMobilePushes({ now: clock, sender: okSender })).claimed, 0);
++    clock = new Date(retry.nextAttemptAt.getTime() + 1);
++    assert.equal((await dispatchMobilePushes({ now: clock, sender: okSender })).sent, 1);
++    clock = new Date(clock.getTime() + 16 * 60_000);
++    assert.equal((await checkMobilePushReceipts({ now: clock, fetchReceipts: async ids => new Map(ids.map(id => [id, { ok: false, errorCode: "MessageRateExceeded" }])) })).retrying, 1);
++    retry = await limited();
++    assert.equal(retry.status, "PENDING");
++    assert.equal(retry.ticketId, null); assert.equal(retry.receiptStatus, null);
++    assert.ok(retry.nextAttemptAt > clock);
++    assert.equal((await dispatchMobilePushes({ now: clock, sender: okSender })).claimed, 0);
++    clock = new Date(retry.nextAttemptAt.getTime() + 1);
++    await dispatchMobilePushes({ now: clock, sender: okSender });
++    clock = new Date(clock.getTime() + 16 * 60_000);
++    assert.equal((await checkMobilePushReceipts({ now: clock, fetchReceipts: async ids => new Map(ids.map(id => [id, { ok: false, errorCode: "MessageRateExceeded" }])) })).retrying, 0);
++    retry = await limited();
++    assert.equal(retry.attemptCount, 3); assert.equal(retry.receiptStatus, "ERROR");
++    assert.equal((await dispatchMobilePushes({ now: clock, sender: okSender })).claimed, 0, "Exhausted rate limits are not sent again");
++
++    // Pre-upgrade deliveries have no snapshot; only a matching new receipt can invalidate a registration.
++    await notify(first.beneficiaryId, "CLAIM_VERIFIED");
++    await dispatchMobilePushes({ sender: okSender });
++    const legacyDelivery = (await deliveries(first.beneficiaryId)).at(-1);
++    await prisma.beneficiaryMobilePushDelivery.update({ where: { deliveryId: legacyDelivery.deliveryId }, data: { sentRegistrationId: null } });
++    const invalidReceipts = async ids => new Map(ids.map(id => [id, { ok: false, errorCode: "DeviceNotRegistered" }]));
++    assert.equal((await checkMobilePushReceipts({ now: receiptTime, fetchReceipts: invalidReceipts })).invalidDevices, 0);
++    assert.equal((await request("/beneficiaries/me/push-device", { token: first.accessToken })).body.data.status, "on");
++    await notify(first.beneficiaryId, "ASSISTANCE_RELEASED");
++    await dispatchMobilePushes({ sender: okSender });
++    assert.equal((await checkMobilePushReceipts({ now: receiptTime, fetchReceipts: invalidReceipts })).invalidDevices, 1);
++    assert.equal((await request("/beneficiaries/me/push-device", { token: first.accessToken })).body.data.status, "invalid");
++
++    // An expired session stops queued alerts at send time and its token is purged.
++    await enable(first, tokens[2]);
++    await notify(first.beneficiaryId, "ASSISTANCE_RELEASED");
++    await prisma.beneficiaryMobileSession.updateMany({ where: { account: { beneficiaryId: first.beneficiaryId } }, data: { expiresAt: new Date(Date.now() - 1) } });
++    assert.equal((await dispatchMobilePushes({ sender: okSender })).cancelled, 1);
++    assert.equal((await deliveries(first.beneficiaryId)).at(-1).lastErrorCode, "SESSION_INACTIVE");
++    assert.ok((await sweepMobilePushes()).inactiveDevices >= 1);
++    assert.equal(await prisma.beneficiaryMobilePushDevice.count({ where: { account: { beneficiaryId: first.beneficiaryId } } }), 0);
++
++    // With push disabled the server reports it clearly and refuses registration.
++    env.mobilePushMode = "DISABLED";
++    const third = await signUp("Charlie");
++    assert.equal((await request("/beneficiaries/me/push-device", { token: third.accessToken })).body.data.status, "unavailable");
++    const refused = await enable(third, tokens[1]);
++    assert.equal(refused.status, 503);
++    assert.equal(refused.body.error.code, "PUSH_UNAVAILABLE");
++
++    assert.ok(!logged.some((line) => line.includes("PushToken") || line.includes("synthetic-phone")), "Tokens never reach logs");
++  } finally {
++    env.mobilePushMode = savedMode;
++    Object.assign(console, original);
++    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
++    await prisma.notification.deleteMany({ where: { beneficiaryId: { in: ids } } });
++    await prisma.auditLog.deleteMany({ where: { recordId: { in: ids }, actorType: "BENEFICIARY" } });
++    await prisma.beneficiary.deleteMany({ where: { beneficiaryId: { in: ids } } });
++    await prisma.barangay.deleteMany({ where: { barangayId } });
++    await prisma.$disconnect();
++  }
++});
+diff --git a/test/mobile-push.test.js b/test/mobile-push.test.js
+new file mode 100644
+index 0000000..9d066af
+--- /dev/null
++++ b/test/mobile-push.test.js
+@@ -0,0 +1,147 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { env } from "../src/config/env.js";
++import { getExpoPushReceipts, PushProviderError, sendExpoPushMessages } from "../src/modules/mobile/mobilePush.expo.js";
++import { decryptPushToken, encryptPushToken, mobilePushConfigured, queueMobilePushDeliveries } from "../src/modules/mobile/mobilePush.service.js";
++import { dispatchMobilePushes, mobilePushMessage } from "../src/modules/mobile/mobilePush.dispatcher.js";
++import { mobilePushDeviceSchema } from "../src/modules/mobile/mobile.schemas.js";
++
++const token = "ExponentPushToken[synthetic-device_0001]";
++
++function withEnv(values, callback) {
++  const saved = Object.fromEntries(Object.keys(values).map((key) => [key, env[key]]));
++  Object.assign(env, values);
++  return Promise.resolve().then(callback).finally(() => Object.assign(env, saved));
++}
++
++const configured = { mobilePushMode: "EXPO", mobileAuthSecret: "synthetic-mobile-secret-at-least-32-chars", fieldEncryptionKey: "a".repeat(64), mobilePushExpoAccessToken: undefined, mobilePushTimeoutMs: 1_000 };
++
++test("Expo requests send JSON batches, optional access tokens and map tickets without echoing provider text", () => withEnv({ ...configured, mobilePushExpoAccessToken: "synthetic-expo-access" }, async () => {
++  const calls = [];
++  const fetchImpl = async (url, init) => {
++    calls.push({ url, init });
++    return new Response(JSON.stringify({ data: [
++      { status: "ok", id: "receipt-1" },
++      { status: "error", message: `"${token}" is not a registered push notification recipient`, details: { error: "DeviceNotRegistered" } },
++      { status: "error", message: "unexpected", details: { error: `<${token}>` } },
++    ] }), { status: 200 });
++  };
++  const messages = [mobilePushMessage(token, randomUUID(), "en"), mobilePushMessage(token, randomUUID(), "bs"), mobilePushMessage(token, randomUUID(), "xx")];
++  const tickets = await sendExpoPushMessages(messages, { fetchImpl });
++  assert.equal(calls[0].url, "https://exp.host/--/api/v2/push/send");
++  assert.equal(calls[0].init.method, "POST");
++  assert.equal(calls[0].init.headers.Authorization, "Bearer synthetic-expo-access");
++  assert.deepEqual(JSON.parse(calls[0].init.body), messages);
++  assert.ok(!calls[0].url.includes("PushToken"), "Tokens never travel in URLs");
++  assert.deepEqual(tickets, [{ ok: true, ticketId: "receipt-1" }, { ok: false, errorCode: "DeviceNotRegistered" }, { ok: false, errorCode: "PushTicketError" }]);
++  assert.ok(!JSON.stringify(tickets).includes("PushToken"));
++  await assert.rejects(sendExpoPushMessages(Array.from({ length: 101 }, () => messages[0]), { fetchImpl }), RangeError);
++}));
++
++test("provider failures are classified for retry without exposing tokens", () => withEnv(configured, async () => {
++  const respond = (status, body) => async () => new Response(JSON.stringify(body), { status });
++  const failure = async (fetchImpl) => {
++    try { await sendExpoPushMessages([mobilePushMessage(token, randomUUID(), "en")], { fetchImpl }); }
++    catch (error) { return error; }
++    assert.fail("Expected a provider failure");
++  };
++  for (const status of [429, 500, 503]) {
++    const error = await failure(respond(status, { errors: [{ code: "TOO_MANY_REQUESTS", message: token }] }));
++    assert.ok(error instanceof PushProviderError);
++    assert.equal(error.retryable, true);
++    assert.equal(error.code, `PUSH_PROVIDER_HTTP_${status}`);
++  }
++  const unauthorized = await failure(respond(401, { errors: [{ code: "UNAUTHORIZED", message: `bad ${token}` }] }));
++  assert.equal(unauthorized.retryable, false);
++  assert.equal(unauthorized.code, "PUSH_PROVIDER_UNAUTHORIZED");
++  const unreachable = await failure(async () => { throw new TypeError(`fetch failed for ${token}`); });
++  assert.equal(unreachable.code, "PUSH_PROVIDER_UNREACHABLE");
++  assert.equal(unreachable.retryable, true);
++  const timeout = await failure((_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))));
++  assert.equal(timeout.code, "PUSH_PROVIDER_TIMEOUT");
++  assert.equal(timeout.retryable, false, "An accepted-but-unconfirmed batch is not resent");
++  const short = await failure(respond(200, { data: [] }));
++  assert.equal(short.code, "PUSH_PROVIDER_INVALID_RESPONSE");
++  for (const error of [unauthorized, unreachable, timeout, short]) assert.ok(!`${error.message}${error.code}`.includes("PushToken"));
++}));
++
++test("receipts map delivered and unregistered devices and skip unknown ids", () => withEnv(configured, async () => {
++  let body;
++  const receipts = await getExpoPushReceipts(["a", "b", "missing"], { fetchImpl: async (url, init) => {
++    assert.equal(url, "https://exp.host/--/api/v2/push/getReceipts");
++    body = JSON.parse(init.body);
++    return new Response(JSON.stringify({ data: { a: { status: "ok" }, b: { status: "error", message: token, details: { error: "DeviceNotRegistered" } } } }));
++  } });
++  assert.deepEqual(body, { ids: ["a", "b", "missing"] });
++  assert.deepEqual([...receipts], [["a", { ok: true }], ["b", { ok: false, errorCode: "DeviceNotRegistered" }]]);
++}));
++
++test("provider deadlines include a stalled response body for sends and receipt lookups", () => withEnv({ ...configured, mobilePushTimeoutMs: 15 }, async () => {
++  for (const request of [
++    fetchImpl => sendExpoPushMessages([mobilePushMessage(token, randomUUID(), "en")], { fetchImpl }),
++    fetchImpl => getExpoPushReceipts(["synthetic-ticket"], { fetchImpl }),
++  ]) {
++    let signal;
++    const result = await Promise.race([
++      request(async (_url, options) => {
++        signal = options.signal;
++        return { status: 200, ok: true, json: () => new Promise((_resolve, reject) => {
++          signal.addEventListener("abort", () => reject(new DOMException("aborted body", "AbortError")), { once: true });
++        }) };
++      }).catch(error => error),
++      new Promise(resolve => setTimeout(() => resolve("deadline was cleared before the body"), 250)),
++    ]);
++    assert.ok(result instanceof PushProviderError);
++    assert.equal(result.code, "PUSH_PROVIDER_TIMEOUT");
++    assert.equal(result.retryable, false, "An accepted but unconfirmed send must not be duplicated");
++    assert.equal(signal.aborted, true);
++  }
++}));
++
++test("lock-screen messages are generic in English and Bisaya and open details by id only", () => {
++  const notificationId = randomUUID();
++  for (const language of ["en", "bs"]) {
++    const message = mobilePushMessage(token, notificationId, language);
++    assert.deepEqual(Object.keys(message).sort(), ["body", "channelId", "data", "priority", "title", "to", "ttl"]);
++    assert.deepEqual(message.data, { kind: "garantiyaid.notification", notificationId });
++    assert.equal(message.title, "GarantiyAid");
++    assert.equal(message.channelId, "account-updates");
++    assert.doesNotMatch(message.body, /enroll|schedule|claim|release|wallet|peso|₱|\d/i);
++  }
++  assert.notEqual(mobilePushMessage(token, notificationId, "en").body, mobilePushMessage(token, notificationId, "bs").body);
++});
++
++test("device tokens are encrypted, bound to their device row, and never stored in plain text", () => withEnv(configured, () => {
++  const deviceId = randomUUID();
++  const sealed = encryptPushToken(token, deviceId);
++  assert.ok(!sealed.includes("PushToken") && !sealed.includes("synthetic-device"));
++  assert.notEqual(sealed, encryptPushToken(token, deviceId), "Each encryption uses a fresh IV");
++  assert.equal(decryptPushToken(sealed, deviceId), token);
++  assert.throws(() => decryptPushToken(sealed, randomUUID()), "Ciphertext copied to another device row is rejected");
++}));
++
++test("push registration input accepts only Expo tokens for Android with a supported language", () => {
++  assert.deepEqual(mobilePushDeviceSchema.parse({ token, platform: "android", language: "bs" }), { token, platform: "android", language: "bs" });
++  assert.ok(mobilePushDeviceSchema.safeParse({ token: "ExpoPushToken[abcdefghij]", platform: "android", language: "en" }).success);
++  for (const body of [
++    { token: "not-a-token", platform: "android", language: "en" },
++    { token: `${token}]`, platform: "android", language: "en" },
++    { token, platform: "ios", language: "en" },
++    { token, platform: "android", language: "tl" },
++    { token, platform: "android", language: "en", beneficiaryId: randomUUID() },
++  ]) {
++    const result = mobilePushDeviceSchema.safeParse(body);
++    assert.equal(result.success, false);
++    assert.ok(!JSON.stringify(result.error.issues.map((issue) => issue.message)).includes(body.token));
++  }
++});
++
++test("disabled or incomplete push configuration queues and sends nothing", () => withEnv({ ...configured, mobilePushMode: "DISABLED" }, async () => {
++  assert.equal(mobilePushConfigured(), false);
++  const database = new Proxy({}, { get: () => { throw new Error("The database must not be used when push is disabled"); } });
++  assert.equal(await queueMobilePushDeliveries(database, [{ notificationId: randomUUID(), beneficiaryId: randomUUID() }]), 0);
++  assert.deepEqual(await dispatchMobilePushes({ database, sender: () => assert.fail("No provider call") }), { claimed: 0, sent: 0, cancelled: 0, failed: 0, retrying: 0 });
++  await withEnv({ mobilePushMode: "EXPO", fieldEncryptionKey: undefined }, () => assert.equal(mobilePushConfigured(), false));
++  await withEnv({ mobilePushMode: "EXPO", mobileAuthSecret: undefined }, () => assert.equal(mobilePushConfigured(), false));
++}));

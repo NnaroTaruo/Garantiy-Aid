@@ -1,0 +1,149 @@
+diff --git a/docs/mobile-notification-preferences-integration.md b/docs/mobile-notification-preferences-integration.md
+new file mode 100644
+index 0000000..f39ec69
+--- /dev/null
++++ b/docs/mobile-notification-preferences-integration.md
+@@ -0,0 +1,11 @@
++# Mobile in-app notification preferences
++
++Apply `mobile-notification-preferences.patch` after `mobile-document-viewing.patch` and the seven preceding version-4 mobile patches on clean backend `42b4552`. Run Prisma generate and migrate deploy before restarting the API. The additive migration adds three Boolean columns to beneficiary_mobile_accounts, defaulting to true for existing and new accounts. No backend/mobile dependency is added.
++
++GET/PATCH `/api/v1/mobile/beneficiaries/me/notification-preferences` requires an active beneficiary mobile session. The response contains only `{ enrollmentUpdates, scheduleUpdates, claimUpdates }`. PATCH requires all three strict Booleans and rejects unknown/owner/delivery fields. The owner comes from the session; the save rechecks and locks the active session/account inside its audit transaction. Responses are private/no-store.
++
++`createMobileNotifications` reads these preferences in the staff action's transaction before creating future automatic IN_APP messages. Enrollment events use enrollmentUpdates, SCHEDULE_PUBLISHED uses scheduleUpdates, and claim verification/release/simulated credit/reversal use claimUpdates. A beneficiary without a mobile account retains the prior default behavior. Existing messages and read timestamps remain intact; re-enabling does not backfill suppressed events. Deduplication and transaction rollback remain in force. Staff broadcasts/manual delivery queues and authentication codes are outside this preference scope.
++
++Mobile replaces the preview SMS/push switches with these saved in-app settings. It handles loading/retry, keeps failed edits, blocks repeated saves and discards results after account changes. The original port-3000 API shows unavailable instead of fake settings. No device push registration, remote push sender, SMS reminder delivery or permission prompt is added. Android remote push requires an Expo development/release build, Expo project/FCM credentials and device delivery validation; Expo Go is insufficient for Android remote push.
++
++The actual mobile-client/API/database suite verifies default values, strict validation, private headers, owner/staff/session isolation, persisted reads from another session, an actual staff review honoring opt-out, category suppression/re-enabling, deduplication, preserved inbox history and logout rejection. Mobile UI regressions cover EN/BS loading/retry, failed draft retention, duplicate taps and late/401 responses. The existing claim-verification fixture adds the mobile account lookup; staff verification/release logic is unchanged.
+diff --git a/prisma/migrations/20261110000300_add_mobile_notification_preferences/migration.sql b/prisma/migrations/20261110000300_add_mobile_notification_preferences/migration.sql
+new file mode 100644
+index 0000000..c072c54
+--- /dev/null
++++ b/prisma/migrations/20261110000300_add_mobile_notification_preferences/migration.sql
+@@ -0,0 +1,4 @@
++ALTER TABLE "beneficiary_mobile_accounts"
++  ADD COLUMN "enrollment_updates" BOOLEAN NOT NULL DEFAULT true,
++  ADD COLUMN "schedule_updates" BOOLEAN NOT NULL DEFAULT true,
++  ADD COLUMN "claim_updates" BOOLEAN NOT NULL DEFAULT true;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index b5c6d97..25f42ed 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -517,6 +517,9 @@ model BeneficiaryMobileAccount {
+   beneficiaryId String    @unique @map("beneficiary_id") @db.Uuid
+   contactNumber String    @unique @map("contact_number") @db.VarChar(20)
+   verifiedAt    DateTime? @map("verified_at") @db.Timestamptz(6)
++  enrollmentUpdates Boolean @default(true) @map("enrollment_updates")
++  scheduleUpdates Boolean @default(true) @map("schedule_updates")
++  claimUpdates Boolean @default(true) @map("claim_updates")
+   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+   updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+ 
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index 495cdfa..6ac842d 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -14,8 +14,8 @@ import { issueMobileClaimPass } from "./mobileClaimPass.service.js";
+ import { getMobileWallet } from "./mobileWallet.service.js";
+ import { getMobileBiometrics, giveMobileBiometricConsent, revokeMobileBiometricConsent } from "./mobileBiometrics.service.js";
+ import { mobileBiometricConsentSchema, mobileBiometricConsentParamsSchema } from "./mobile.schemas.js";
+-import { getMobileNotifications, readMobileNotification } from "./mobileNotifications.service.js";
+-import { mobileNotificationParamsSchema } from "./mobile.schemas.js";
++import { getMobileNotifications, readMobileNotification, getMobileNotificationPreferences, updateMobileNotificationPreferences } from "./mobileNotifications.service.js";
++import { mobileNotificationParamsSchema, mobileNotificationPreferencesSchema } from "./mobile.schemas.js";
+ import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
+ import { mobileOtpRequestSchema, mobileOtpVerificationSchema, mobileProfileSchema, mobileRegistrationSchema } from "./mobile.schemas.js";
+ import { authenticateMobile, logoutMobile, mobileProfile, registerMobile, requestMobileOtp, updateMobileProfile, verifyMobileOtp } from "./mobile.service.js";
+@@ -74,6 +74,12 @@ mobileRoutes.post("/beneficiaries/me/biometric-consents", validateBody(mobileBio
+ mobileRoutes.post("/beneficiaries/me/biometric-consents/:consentId/revoke", validateParams(mobileBiometricConsentParamsSchema), asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await revokeMobileBiometricConsent(req.mobileSession, req.validatedParams.consentId) });
+ }));
++mobileRoutes.get("/beneficiaries/me/notification-preferences", (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: getMobileNotificationPreferences(req.mobileSession) });
++});
++mobileRoutes.patch("/beneficiaries/me/notification-preferences", validateBody(mobileNotificationPreferencesSchema), asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await updateMobileNotificationPreferences(req.mobileSession, req.validatedBody) });
++}));
+ mobileRoutes.get("/beneficiaries/me/notifications", asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileNotifications(req.mobileSession) });
+ }));
+diff --git a/src/modules/mobile/mobile.schemas.js b/src/modules/mobile/mobile.schemas.js
+index 60fdc63..f519c4d 100644
+--- a/src/modules/mobile/mobile.schemas.js
++++ b/src/modules/mobile/mobile.schemas.js
+@@ -29,6 +29,9 @@ export const mobileRegistrationSchema = createBeneficiarySchema.pick({ birthDate
+ 
+ export const mobileOtpRequestSchema = z.object({ contactNumber, purpose }).strict();
+ export const mobileNotificationParamsSchema = z.object({ notificationId: z.uuid() }).strict();
++export const mobileNotificationPreferencesSchema = z.object({
++  enrollmentUpdates: z.boolean(), scheduleUpdates: z.boolean(), claimUpdates: z.boolean(),
++}).strict();
+ export const mobileBiometricConsentSchema = z.object({ consentVersion: z.string().min(1).max(20),
+   retentionUntil: z.iso.datetime(), expectedConsentId: z.uuid().nullable() }).strict();
+ export const mobileBiometricConsentParamsSchema = z.object({ consentId: z.uuid() }).strict();
+diff --git a/src/modules/mobile/mobileNotifications.service.js b/src/modules/mobile/mobileNotifications.service.js
+index 0decda0..4ab71ee 100644
+--- a/src/modules/mobile/mobileNotifications.service.js
++++ b/src/modules/mobile/mobileNotifications.service.js
+@@ -1,6 +1,24 @@
+ import { createHash } from "node:crypto";
+ import prisma from "../../lib/prisma.js";
+ import { AppError } from "../../utils/AppError.js";
++import { lockMobileSession } from "./mobile.service.js";
++
++const preferenceSelect = { enrollmentUpdates: true, scheduleUpdates: true, claimUpdates: true };
++const preferenceField = { account: "enrollmentUpdates", schedule: "scheduleUpdates", claim: "claimUpdates" };
++
++export function getMobileNotificationPreferences(session) {
++  return Object.fromEntries(Object.keys(preferenceSelect).map(key => [key, session.account[key]]));
++}
++
++export async function updateMobileNotificationPreferences(session, input) {
++  return prisma.$transaction(async tx => {
++    const account = await lockMobileSession(tx, session);
++    const saved = await tx.beneficiaryMobileAccount.update({ where: { accountId: account.accountId }, data: input, select: preferenceSelect });
++    await tx.auditLog.create({ data: { actorType: "BENEFICIARY", action: "MOBILE_NOTIFICATION_PREFERENCES_UPDATED",
++      entityAffected: "BENEFICIARY", recordId: account.beneficiaryId, details: { source: "MOBILE_APP" } } });
++    return saved;
++  });
++}
+ 
+ // Titles and generated messages are controlled here; staff notes and identity evidence are never copied.
+ const events = {
+@@ -18,7 +36,7 @@ const events = {
+ export async function createMobileNotifications(database, notifications) {
+   if (!notifications.length) return;
+   const sentAt = new Date();
+-  await database.notification.createMany({ data: notifications.map(({ beneficiaryId, type, reference, label = "", scheduleId = null, distributionId = null }) => {
++  const rows = notifications.map(({ beneficiaryId, type, reference, label = "", scheduleId = null, distributionId = null }) => {
+     const event = events[type];
+     if (!event) throw new Error("Unsupported mobile notification event");
+     const prefix = label ? `${label}: ` : "";
+@@ -27,7 +45,14 @@ export async function createMobileNotifications(database, notifications) {
+       message: prefix + event[3], messageBs: prefix + event[4],
+       deduplicationKey: createHash("sha256").update(`mobile-in-app:${type}:${reference}`).digest("hex"),
+     };
+-  }), skipDuplicates: true });
++  });
++  const accounts = await database.beneficiaryMobileAccount.findMany({
++    where: { beneficiaryId: { in: [...new Set(rows.map(row => row.beneficiaryId))] } },
++    select: { beneficiaryId: true, ...preferenceSelect },
++  });
++  const preferences = new Map(accounts.map(account => [account.beneficiaryId, account]));
++  const enabled = rows.filter(row => preferences.get(row.beneficiaryId)?.[preferenceField[events[row.notificationType][0]]] !== false);
++  if (enabled.length) await database.notification.createMany({ data: enabled, skipDuplicates: true });
+ }
+ 
+ function visibleWhere(session, now = new Date()) {
+diff --git a/test/claim-verification-time.test.js b/test/claim-verification-time.test.js
+index d9e1f66..cdc0204 100644
+--- a/test/claim-verification-time.test.js
++++ b/test/claim-verification-time.test.js
+@@ -48,6 +48,7 @@ function fixture(requirement, existing = null) {
+     biometricVerificationAttempt: { create: async () => ({ attemptId: randomUUID() }) },
+     claimSignature: { create: async ({ data }) => ({ ...data, signatureId: randomUUID(), signedAt: new Date() }) },
+     auditLog: { create: async () => ({}) },
++    beneficiaryMobileAccount: { findMany: async () => [] },
+     notification: { createMany: async ({ data }) => {
+       for (const row of data) if (!notifications.some(item => item.deduplicationKey === row.deduplicationKey)) notifications.push(row);
+       return { count: data.length };

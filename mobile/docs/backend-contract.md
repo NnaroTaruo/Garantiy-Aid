@@ -30,6 +30,17 @@ GET `/beneficiaries/me/document-requirements?page=1&pageSize=10` returns `{ data
 
 Both APIs expose authenticated GET `/beneficiaries/me/documents/:documentId/content`. The response is private attachment bytes with the saved MIME and nosniff/no-store headers; shared REMOVED records and missing files return 404. The mobile client validates PDF/JPEG/PNG MIME, recorded size (up to 5 MB) and magic bytes, rejects redirects, and cancels timed-out/closed requests. Browser rendering uses temporary blob URLs; native uses temporary cache files and the system open/save chooser. No token appears in a file URL. Shared `mobile-document-viewing.patch` corrects MIME selection after the checklist patch, without a migration. See [document viewing](document-viewing.md).
 
+## Shared in-app notification preferences (phase 12)
+
+GET/PATCH `/beneficiaries/me/notification-preferences` returns only `{ enrollmentUpdates, scheduleUpdates, claimUpdates }`. PATCH requires three strict Booleans, rejects unknown/owner fields and rechecks the active session under the account lock before saving/auditing. The account is always supplied by the mobile session. `createMobileNotifications` checks these preferences inside each staff action's transaction for future generated IN_APP events; existing messages/read times remain intact, and re-enabling does not backfill. Defaults are true, including accounts predating the migration. Manual broadcasts, sign-in codes and external delivery are separate. The original mobile backend shows unavailable. Apply `mobile-notification-preferences.patch` after the viewer patch and deploy its additive migration. See [notification settings](notification-settings.md).
+
+Phone-alert registration for the current session:
+- GET `/beneficiaries/me/push-device` returns `{ configured, status: 'unavailable' | 'off' | 'on' | 'invalid', enabled, language, updatedAt }`, and never the token.
+- PUT on the same path takes `{ token: 'ExponentPushToken[...]', platform: 'android', language: 'en' | 'bs' }` in the JSON body only. It is strict and rate-limited, and returns 503 `PUSH_UNAVAILABLE` when the server has push disabled.
+- DELETE turns alerts off for this session.
+
+Logout deletes the session's registration. A token registered by another session moves to the new one. Alerts carry only `{ kind: 'garantiyaid.notification', notificationId }` with generic EN/BS text; details load through the signed-in account. Apply `mobile-push-notifications.patch` after the preferences patch. See [Android phone alerts](push-notifications.md).
+
 ## Implemented original mobile API
 
 Phase 7 keeps the existing registration/code-request/verification endpoints. Optional SMS mode uses a private Semaphore key and never returns a development code or raw gateway response. Challenge creation commits before sending, delivery must be accepted before verification, and failed sends invalidate that challenge. OTP/session mode binding rejects development credentials in SMS mode. Registration and code-request clients allow 20 seconds for delivery/database work. Recover account uses the existing login purpose; it does not reset a password, change a number or link a staff record. The adapter is prepared but unactivated because the team has no provider account. See [SMS setup](sms-setup.md).

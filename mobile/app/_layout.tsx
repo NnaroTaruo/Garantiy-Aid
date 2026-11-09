@@ -10,6 +10,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { DemoProvider, useDemo } from '../src/state';
 import { colors } from '../src/theme';
 import { Button, Logo, Notice, Page, Txt } from '../src/components';
+import { PushBridge } from '../src/push-bridge';
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
@@ -28,6 +29,17 @@ export default function RootLayout() {
 }
 
 function RootNavigator({ fontsReady }: { fontsReady: boolean }) {
+  const { authError, authLoading } = useDemo();
+  // Mounted above the loading screen so an alert that launched the app waits for navigation.
+  return (
+    <>
+      <PushBridge navigationReady={fontsReady && !authLoading && !authError} />
+      <RootContent fontsReady={fontsReady} />
+    </>
+  );
+}
+
+function RootContent({ fontsReady }: { fontsReady: boolean }) {
   const { accessToken, authError, authLoading, restoreSession, t } = useDemo();
   if (!fontsReady || authLoading)
     return (

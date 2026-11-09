@@ -1,9 +1,10 @@
+import { NotificationSettings } from './notification-settings';
 import { SupportContent } from './support';
 import { DocumentChecklist } from './document-checklist';
 import { DocumentPreview } from './document-preview';
 import { BiometricPrivacy } from './biometrics';
 import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, Switch, View } from 'react-native';
+import { Pressable, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import QRCode from 'react-native-qrcode-svg';
@@ -609,6 +610,18 @@ function NotificationDetails() {
   const [saving, setSaving] = useState(false);
   const [readError, setReadError] = useState(false);
   const [readAttempt, setReadAttempt] = useState(0);
+  const [lookingUp, setLookingUp] = useState(false);
+  const lookedUp = useRef('');
+  // A phone alert can open before the inbox has its notice; load it once through the current account.
+  useEffect(() => {
+    const key = `${accessToken}:${id}`;
+    if (!accessToken || !id || notice || lookedUp.current === key) return;
+    lookedUp.current = key;
+    let active = true;
+    setLookingUp(true);
+    void refreshNotifications().finally(() => { if (active) setLookingUp(false); });
+    return () => { active = false; };
+  }, [id, accessToken, !!notice]);
   useEffect(() => {
     let active = true;
     setReadError(false);
@@ -625,7 +638,7 @@ function NotificationDetails() {
     return () => { active = false; };
   }, [notice?.id, accessToken, readAttempt]);
   if (!accessToken) return <Notice>{t('Sign in to view your notifications.', 'Pag-sign in para makita ang imong pahibalo.')}</Notice>;
-  if (!notice && notificationsLoading) return <Notice>{t('Loading notifications…', 'Nag-load sa mga pahibalo…')}</Notice>;
+  if (!notice && (notificationsLoading || lookingUp)) return <Notice>{t('Loading notifications…', 'Nag-load sa mga pahibalo…')}</Notice>;
   if (!notice && notificationsError) return (
     <>
       <Notice tone="error">{t('Your notifications could not be loaded.', 'Wala ma-load ang imong mga pahibalo.')}</Notice>
@@ -911,49 +924,6 @@ function Password() {
     </>
   );
 }
-function NotificationSettings() {
-  const { t } = useDemo();
-  const [sms, setSms] = useState(true);
-  const [push, setPush] = useState(true);
-  return (
-    <>
-      <Card>
-        {[
-          {
-            label: t('SMS schedule reminders', 'SMS nga pahinumdom'),
-            value: sms,
-            set: setSms,
-          },
-          {
-            label: t('Push notifications', 'Mga push nga pahibalo'),
-            value: push,
-            set: setPush,
-          },
-        ].map(({ label, value, set }) => (
-          <View key={label} style={[styles.row, { justifyContent: 'space-between' }]}>
-            <Txt variant="label" style={{ flex: 1 }}>
-              {label}
-            </Txt>
-            <Switch
-              accessibilityLabel={label}
-              value={value}
-              onValueChange={set}
-              trackColor={{ false: c.outline, true: c.primary }}
-              thumbColor={c.card}
-            />
-          </View>
-        ))}
-      </Card>
-      <Notice>
-        {t(
-          'Preview delivery preferences. SMS and push are not connected; these switches reset when this screen closes. Saved in-app messages remain available in Notifications.',
-          'Preview sa delivery preferences. Wala pay SMS ug push; mareset kini nga switches kon sirad-an ang screen. Ang natipig nga mensahe makita gihapon sa Notifications.',
-        )}
-      </Notice>
-    </>
-  );
-}
-
 function EnrollmentStatus() {
   const { overview, overviewLoading, overviewError, refreshOverview, t } = useDemo();
   if (overviewLoading) {

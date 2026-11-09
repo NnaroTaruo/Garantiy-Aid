@@ -371,6 +371,42 @@ export async function getNotifications(accessToken: string) {
   ).data;
 }
 
+export type NotificationPreferences = { enrollmentUpdates: boolean; scheduleUpdates: boolean; claimUpdates: boolean };
+export async function getNotificationPreferences(accessToken: string) {
+  return (await request<{ data: NotificationPreferences }>('/beneficiaries/me/notification-preferences', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })).data;
+}
+export async function updateNotificationPreferences(accessToken: string, input: NotificationPreferences) {
+  return (await request<{ data: NotificationPreferences }>('/beneficiaries/me/notification-preferences', {
+    method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}` }, body: JSON.stringify(input),
+  })).data;
+}
+
+// Phone alerts belong to the signed-in session. The server never returns the device token.
+export type PushDeviceState = {
+  configured: boolean;
+  status: 'unavailable' | 'off' | 'on' | 'invalid';
+  enabled: boolean;
+  language: 'en' | 'bs' | null;
+  updatedAt: string | null;
+};
+export async function getPushDevice(accessToken: string) {
+  return (await request<{ data: PushDeviceState }>('/beneficiaries/me/push-device', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })).data;
+}
+export async function registerPushDevice(accessToken: string, input: { token: string; platform: 'android'; language: 'en' | 'bs' }) {
+  return (await request<{ data: PushDeviceState }>('/beneficiaries/me/push-device', {
+    method: 'PUT', headers: { Authorization: `Bearer ${accessToken}` }, body: JSON.stringify(input),
+  })).data;
+}
+export async function removePushDevice(accessToken: string) {
+  return (await request<{ data: PushDeviceState }>('/beneficiaries/me/push-device', {
+    method: 'DELETE', headers: { Authorization: `Bearer ${accessToken}` },
+  })).data;
+}
+
 export async function markNotificationRead(accessToken: string, id: string) {
   return (
     await request<{ data: { id: string; readAt: string } }>(

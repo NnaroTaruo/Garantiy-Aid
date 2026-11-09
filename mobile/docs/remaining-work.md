@@ -1,10 +1,10 @@
 # Remaining mobile work
 
-Reviewed November 10, 2026, after staff support, named document checklists and private saved-file viewing/downloads. These are work areas; external setup and hands-on validation are separate from completed local code.
+Reviewed November 10, 2026, after staff support, named document checklists, private saved-file viewing/downloads, saved in-app notification preferences and the Android phone-alert code. These are work areas; external setup and hands-on validation are separate from completed local code.
 
 | Priority | Work | What remains |
 | --- | --- | --- |
-| Next coding task | Notification preferences and push | Save supported preferences and add physical-device push registration/delivery with the team. The in-app inbox/read state already works; background delivery does not. |
+| Account setup + device test | Android phone alerts | Code, tests and `mobile-push-notifications.patch` are complete locally (opt-in registration, post-commit Expo sender, logout/account-change cutoff, generic alerts, tap routing). Remaining steps: create the EAS project ID, Android package, Firebase `google-services.json` and FCM V1 key; set `MOBILE_PUSH_MODE=EXPO`; build a development or release app; then validate delivery, taps, logout and account changes on a phone. Follow [Android phone alerts](push-notifications.md). Real delivery is unverified. |
 | Provider setup | Real verification SMS | Choose/configure an SMS provider, private key/sender/credits and test receipt on a real phone. The optional Semaphore adapter is prepared, but the team has no provider account and local mode remains DEVELOPMENT. |
 | Team validation | Real face matching | Configure and validate the staff backend's real model/liveness service. Mobile consent/status is connected; the local processor remains SIMULATED. The facilitator captures faces. |
 | Team integration | Shared hosted backend | Review/merge the portable mobile backend patches with the web teammate, deploy a shared API/database and durable private document storage, and configure mobile URLs/secrets outside Expo public variables. Local GitHub publication alone does not deploy it. |

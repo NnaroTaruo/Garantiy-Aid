@@ -33,7 +33,15 @@
         }
       ],
       "expo-secure-store",
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#155596",
+          "defaultChannel": "account-updates"
+        }
+      ]
     ]
   }
 }

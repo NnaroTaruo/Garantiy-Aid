@@ -275,6 +275,14 @@ The sex field is a labeled native radio group containing Female, Male, and Prefe
 
 **The Live Error Rule.** Store field validity separately from translated copy, then expose the active-language correction through the control label or hint and an assertive alert.
 
+### Saved Notification Preferences
+
+The shared-backend settings screen groups enrollment, schedule, and claim/release updates in the existing outlined card. Each entire row is one accessible switch with a minimum height (48 dp), a localized English/Bisaya label, and checked/disabled state. The native `Switch` is a decorative indicator hidden from accessibility and pointer interaction; the row owns activation. Its track uses the existing primary/outline colors and its thumb uses the card color.
+
+Changes remain a draft until **Save preferences** succeeds. Rows are disabled while loading or saving, and Save is unavailable when nothing has changed. A failed save retains the visible draft and offers another save attempt. Loading, error, and saved confirmation notices use polite live regions with localized copy and the existing notice tones; a failed initial load provides **Try again**.
+
+Saved choices control future generated `IN_APP` enrollment, schedule, and claim messages; existing saved messages remain available. SMS reminders and phone push alerts are inactive, and sign-in codes are unaffected. Browser-rendered React Native web evidence is under `.tmp/notification-preferences-ui-review/`; it does not establish physical Android or TalkBack validation.
+
 ### Appointment Card
 
 A blue schedule container combines the appointment program/date/time, a status badge, a lighter blue queue/venue panel, and a QR action. The large queue numeral is its strongest information hierarchy. The queue panel and QR action retain local blue shades from `mobile/src/screens/main.tsx`; they are signature-component styling, not new global palette tokens. The status label responds to the preview session's claim state.
