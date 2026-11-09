@@ -206,6 +206,26 @@ test('the latest schedule refresh wins without an older response changing loadin
   }
 });
 
+test('the latest wallet refresh wins over stale success, failure and unauthorized responses', async () => {
+  for (const outcome of ['success', 'failure', 'unauthorized']) {
+    const older = deferred(), newer = deferred();
+    let loads = 0;
+    const render = provider({ getWalletOverview: () => ++loads === 1
+      ? wallet('initial') : loads === 2 ? older.promise : newer.promise });
+    await render().startSession('owner', beneficiary('owner'));
+    const oldRequest = render().refreshWallet(), newRequest = render().refreshWallet();
+    newer.resolve(wallet('current'));
+    await newRequest;
+    if (outcome === 'success') older.resolve(wallet('outdated'));
+    else older.reject(outcome === 'unauthorized' ? new ApiRequestError(401) : new Error('Old request failed'));
+    await oldRequest;
+    assert.equal(render().wallet.wallet.id, 'current');
+    assert.equal(render().accessToken, 'owner');
+    assert.equal(render().walletLoading, false);
+    assert.equal(render().walletError, false);
+  }
+});
+
 test('Home, schedule and enrollment screens render shared records and honest states in both languages', () => {
   let page = 'enrollment-status', refreshes = 0;
   const state = {
@@ -688,7 +708,7 @@ test('wallet empty history appears only after a successful load', () => {
     'expo-router': {},
     'lucide-react-native': components,
     '../components': components,
-    '../state': { useDemo: () => state, peso: String },
+    '../state': { useDemo: () => state, peso: String, signedPeso: String },
     '../api': {},
     '../format': {},
     '../theme': { colors: {}, fonts: {} },
@@ -704,6 +724,50 @@ test('wallet empty history appears only after a successful load', () => {
   state.walletError = false;
   state.wallet = wallet('empty');
   assert.ok(content().includes('No wallet history yet'));
+});
+
+test('wallet distinguishes physical release evidence, pending verification, missing accounts and ledger reversals in EN and BS', () => {
+  const { peso, signedPeso } = loadSource('state.tsx', {
+    react: { createContext: () => ({}) }, './api': {}, './session-storage': {},
+  });
+  const claim = { id: 'released', status: 'claimed', amount: 1000, date: '2026-11-10',
+    deliveryMode: 'physical_goods', program: { name: 'Saved assistance program' },
+    verifiedAt: '2026-11-09T14:01:00Z', releasedAt: '2026-11-09T14:32:00Z',
+    package: { name: 'Saved food package', quantity: 1, unit: 'pack' },
+    receipt: { number: 'SAVED-RECEIPT-001', issuedAt: '2026-11-09T14:34:00Z' }, needsReview: true };
+  const state = { t: en => en, walletLoading: false, walletError: false,
+    wallet: { wallet: null, currentClaim: null, claims: [claim], transactions: [{
+      id: 'reversal', claimId: 'released', type: 'benefit_reversal', amount: -1000, status: 'completed',
+      reference: 'REVERSAL-001', program: claim.program, createdAt: '2026-11-09T14:35:00Z',
+    }] } };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const source = loadSource('screens/main.tsx', {
+    react: { createElement: (type, props, ...children) => ({ type, props, children }), useState: initial => [initial, () => {}] },
+    'react-native': { StyleSheet: { create: styles => styles } }, 'expo-router': {},
+    'lucide-react-native': components, '../components': components,
+    '../state': { useDemo: () => state, peso, signedPeso }, '../api': {},
+    '../format': loadSource('format.ts', {}), '../theme': { colors: {}, fonts: {} },
+  });
+  const expand = node => Array.isArray(node) ? node.map(expand) : node && typeof node === 'object'
+    ? typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) } : node;
+  const content = () => JSON.stringify(expand(source.WalletScreen()));
+  for (const language of ['en', 'bs']) {
+    state.t = (en, bs) => language === 'en' ? en : bs;
+    const result = content();
+    for (const value of ['Saved food package', '1 pack', 'SAVED-RECEIPT-001', '−₱1,000.00']) assert.ok(result.includes(value));
+    assert.ok(result.includes(language === 'en' ? 'Released' : 'Nahatag'));
+    assert.ok(result.includes(language === 'en' ? 'No wallet account yet' : 'Wala pay wallet account'));
+    assert.ok(result.includes(language === 'en' ? 'Staff are reviewing' : 'Gisusi pa sa staff'));
+    assert.ok(result.includes(language === 'en' ? 'Assistance reversal' : 'Pagbalik sa narekord'));
+  }
+  state.t = en => en;
+  state.wallet.currentClaim = { ...claim, id: 'pending', status: 'pending', package: null, receipt: null, releasedAt: null, verifiedAt: null, needsReview: false };
+  assert.ok(content().includes('Pending verification'));
+  state.wallet.currentClaim.status = 'verified';
+  assert.ok(content().includes('Verified · awaiting release'));
+  state.wallet.wallet = { balance: 0 };
+  assert.ok(content().includes('₱0.00'));
+  assert.ok(!content().includes('No wallet account yet'));
 });
 
 test('notification screens render saved records, translations, and honest loading/error/empty states', () => {
@@ -756,6 +820,140 @@ test('notification screens render saved records, translations, and honest loadin
   assert.ok(JSON.stringify(main.HomeScreen()).includes('Open notifications, unread messages'));
   state.notifications[0].readAt = 'saved';
   assert.ok(!JSON.stringify(main.HomeScreen()).includes('Open notifications, unread messages'));
+});
+
+function claimPassScreen(issueClaimPass) {
+  const slots = [], pendingEffects = [], timers = new Map();
+  let cursor = 0, timerId = 0, now = Date.now(), resets = 0, destination;
+  const state = { accessToken: 'owner', t: (en) => en,
+    reset: async () => { resets++; state.accessToken = ''; } };
+  const useState = (initial) => {
+    const index = cursor++;
+    if (!(index in slots)) slots[index] = initial;
+    return [slots[index], (value) => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }];
+  };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const source = loadSource('screens/details.tsx', {
+    react: { createElement: (type, props, ...children) => ({ type, props, children }), useState,
+      useRef: (initial) => useState({ current: initial })[0],
+      useEffect: (effect, deps) => {
+        const index = cursor++, previous = slots[index];
+        if (previous && deps.every((value, i) => Object.is(value, previous.deps[i]))) return;
+        pendingEffects.push(() => { previous?.cleanup?.(); slots[index] = { deps, cleanup: effect() }; });
+      } },
+    'react-native': {}, 'expo-router': { useLocalSearchParams: () => ({ page: 'qr-pass' }),
+      router: { replace: (route) => { destination = route; } } },
+    'expo-document-picker': {}, 'react-native-qrcode-svg': 'QRCode', 'lucide-react-native': components,
+    '../components': components, '../state': { useDemo: () => state },
+    '../theme': { colors: {}, fonts: {} }, '../format': loadSource('format.ts', {}), './main': { s: {} },
+    '../api': { ApiRequestError, issueClaimPass },
+  }, { Date: class extends Date { static now() { return now; } },
+    setInterval: (check) => { timers.set(++timerId, check); return timerId; },
+    clearInterval: (id) => timers.delete(id) });
+  const render = () => {
+    cursor = 0;
+    const tree = source.DetailScreen().children[0].children[0].type();
+    for (const effect of pendingEffects.splice(0)) effect();
+    return tree;
+  };
+  const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes)
+    : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  return { state, render, content: () => JSON.stringify(render()),
+    refresh: () => nodes(render()).find(node => node.type === 'Button' && node.children.includes(state.t('Refresh pass', 'I-refresh ang pass'))).props.onPress,
+    code: () => nodes(render()).find(node => node.type === 'QRCode')?.props.value,
+    advance: (milliseconds) => { now += milliseconds; for (const check of timers.values()) check(); },
+    unmount: () => { for (const slot of slots) slot?.cleanup?.(); },
+    result: () => ({ resets, destination, timers: timers.size }),
+    pass: (code = 'synthetic-qr-credential') => ({ id: 'pass', claimCode: code, status: 'active',
+      issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60000).toISOString(),
+      schedule: { id: 'schedule', date: '2026-11-10', slotStart: '2026-11-10T00:00:00+08:00',
+        slotEnd: '2026-11-10T00:30:00+08:00', queueNumber: 47, location: 'Assigned session venue', program: { name: 'Saved program' } } }),
+  };
+}
+
+test('QR passes render server credentials, expiry, retry and staff decisions in both languages', async () => {
+  let response = deferred(), calls = 0;
+  const screen = claimPassScreen(async () => { calls++; return response.promise; });
+  assert.ok(screen.content().includes('Issuing your secure QR pass'));
+  response.resolve(screen.pass());
+  await new Promise(setImmediate);
+  assert.equal(screen.code(), 'synthetic-qr-credential');
+  assert.ok(screen.content().includes('Assigned session venue'));
+  assert.ok(screen.content().includes('#047'));
+  assert.ok(screen.content().includes('Active pass'));
+  assert.equal(screen.result().timers, 1);
+  screen.advance(61000);
+  assert.equal(screen.code(), undefined);
+  assert.ok(screen.content().includes('This pass has expired'));
+  response = deferred();
+  const refresh = screen.refresh();
+  refresh(); refresh();
+  assert.equal(calls, 2);
+  assert.equal(screen.code(), undefined);
+  response.reject(new ApiRequestError(0, undefined, 'NETWORK_ERROR'));
+  await new Promise(setImmediate);
+  assert.ok(screen.content().includes('Check your connection'));
+  for (const [code, text] of [
+    ['CLAIM_PASS_UNAVAILABLE', 'no eligible published schedule'],
+    ['CLAIM_PASS_REVOKED', 'Staff revoked this pass'],
+    ['CLAIM_PASS_PROCESSED', 'staff have started processing'],
+    ['CLAIM_PASS_EXPIRED', 'This pass has expired'],
+    ['CLAIM_PASS_STAFF_ISSUED', 'Staff issued your pass separately'],
+    ['QR_NOT_REQUIRED', 'another verification method'],
+    ['QR_CLAIM_CONCURRENT_CHANGE', 'record changed'],
+    ['RATE_LIMIT_EXCEEDED', 'Too many requests'],
+  ]) {
+    response = deferred();
+    screen.refresh()();
+    response.reject(new ApiRequestError(code === 'RATE_LIMIT_EXCEEDED' ? 429 : 409, undefined, code));
+    await new Promise(setImmediate);
+    assert.ok(screen.content().includes(text), code);
+    assert.equal(screen.code(), undefined);
+    screen.state.t = (_en, bs) => bs;
+    assert.ok(!screen.content().includes(text), 'Bisaya feedback for ' + code);
+    screen.state.t = en => en;
+  }
+  response = deferred();
+  screen.refresh()();
+  response.resolve(screen.pass('rechecked-credential'));
+  await new Promise(setImmediate);
+  screen.render(); // Run the new pass's expiry effect before checking the committed render.
+  assert.equal(screen.code(), 'rechecked-credential');
+  screen.unmount();
+  assert.equal(screen.result().timers, 0);
+});
+
+test('pending QR responses cannot expose an old pass or sign out another session', async () => {
+  for (const change of ['logout', 'switch', 'unmount']) for (const outcome of ['success', 'unauthorized']) {
+    const old = deferred(), fresh = deferred();
+    const screen = claimPassScreen(token => token === 'owner' ? old.promise : fresh.promise);
+    screen.render();
+    if (change === 'unmount') screen.unmount();
+    else {
+      screen.state.accessToken = change === 'logout' ? '' : 'new-owner';
+      assert.equal(screen.code(), undefined);
+    }
+    if (change === 'switch') {
+      fresh.resolve(screen.pass('new-owner-credential'));
+      await new Promise(setImmediate);
+      assert.equal(screen.code(), 'new-owner-credential');
+    }
+    if (outcome === 'success') old.resolve(screen.pass('old-owner-credential'));
+    else old.reject(new ApiRequestError(401));
+    await new Promise(setImmediate);
+    assert.equal(screen.result().resets, 0);
+    if (change !== 'unmount') {
+      assert.ok(!screen.content().includes('old-owner-credential'));
+      if (change === 'switch') assert.equal(screen.code(), 'new-owner-credential');
+      screen.unmount();
+    }
+  }
+  const expiredSession = claimPassScreen(async () => { throw new ApiRequestError(401); });
+  expiredSession.render();
+  await new Promise(setImmediate);
+  assert.equal(expiredSession.result().resets, 1);
+  assert.equal(expiredSession.result().destination, '/');
+  expiredSession.unmount();
 });
 
 test('the profile form retains failed edits, prevents double saves, and sends only editable fields', async () => {

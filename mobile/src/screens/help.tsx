@@ -15,8 +15,8 @@ import { peso, useDemo } from '../state';
 import {
   formatDate,
   formatDateTime,
+  formatClaimStatus,
   formatQueueNumber,
-  formatStatus,
   formatTimeSlot,
 } from '../format';
 import { colors as c } from '../theme';
@@ -106,17 +106,17 @@ export function HelpScreen() {
           ? ` Girekord kini niadtong ${formatDateTime(current.claimedAt)}.`
           : '';
         return {
-          en: `Your current ${current.program.name} claim status is ${formatStatus(current.status)}.${recordedEn}`,
-          bs: `Ang kahimtang sa imong kasamtangang ${current.program.name} claim kay ${formatStatus(current.status)}.${recordedBs}`,
+          en: `Your current ${current.program.name} claim status is ${formatClaimStatus(current.status, en => en, current.deliveryMode)}.${recordedEn}`,
+          bs: `Ang kahimtang sa imong kasamtangang ${current.program.name} claim kay ${formatClaimStatus(current.status, (_en, bs) => bs, current.deliveryMode)}.${recordedBs}`,
         };
       }
       const latest = wallet?.claims[0];
       if (latest) {
         const transaction = wallet?.transactions.find((item) => item.claimId === latest.id);
-        const receiptEn = transaction
+        const receiptEn = latest.receipt ? ` Receipt number: ${latest.receipt.number}.` : transaction
           ? ` Receipt ${transaction.reference} records ${peso(transaction.amount)}.`
           : '';
-        const receiptBs = transaction
+        const receiptBs = latest.receipt ? ` Numero sa resibo: ${latest.receipt.number}.` : transaction
           ? ` Ang resibo ${transaction.reference} nagrekord og ${peso(transaction.amount)}.`
           : '';
         const recordedEn = latest.claimedAt
@@ -126,8 +126,8 @@ export function HelpScreen() {
           ? ` Girekord kini niadtong ${formatDateTime(latest.claimedAt)}.`
           : '';
         return {
-          en: `Your latest ${latest.program.name} claim status is ${formatStatus(latest.status)}.${recordedEn}${receiptEn}`,
-          bs: `Ang pinakabag-o nimong ${latest.program.name} claim kay ${formatStatus(latest.status)}.${recordedBs}${receiptBs}`,
+          en: `Your latest ${latest.program.name} claim status is ${formatClaimStatus(latest.status, en => en, latest.deliveryMode)}.${recordedEn}${receiptEn}`,
+          bs: `Ang pinakabag-o nimong ${latest.program.name} claim kay ${formatClaimStatus(latest.status, (_en, bs) => bs, latest.deliveryMode)}.${recordedBs}${receiptBs}`,
         };
       }
       return {

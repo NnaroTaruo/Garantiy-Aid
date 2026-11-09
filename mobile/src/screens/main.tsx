@@ -32,14 +32,16 @@ import {
   styles,
   Txt,
 } from '../components';
-import { peso, useDemo } from '../state';
-import { ApiRequestError, logout, type WalletTransaction } from '../api';
+import { peso, signedPeso, useDemo } from '../state';
+import { ApiRequestError, logout, type WalletTransaction, type ClaimRecord, type CurrentClaim } from '../api';
 import {
   formatDate,
   formatDateTime,
   formatQueueNumber,
   formatStatus,
   formatTimeSlot,
+  formatClaimStatus,
+  formatTransactionType,
 } from '../format';
 import { colors as c, fonts } from '../theme';
 
@@ -226,11 +228,25 @@ export function HomeScreen() {
   );
 }
 
+function ClaimReleaseDetails({ claim }: { claim: ClaimRecord | CurrentClaim }) {
+  const { t } = useDemo();
+  return <>
+    {claim.deliveryMode === 'physical_goods' && <DetailRow label={t('Delivery', 'Paghatag')} value={t('Physical assistance', 'Pisikal nga ayuda')} />}
+    {claim.verifiedAt && <DetailRow label={t('Verified', 'Napamatud-an')} value={formatDateTime(claim.verifiedAt)} />}
+    {claim.package && <DetailRow label={t('Package received', 'Nadawat nga pakete')} value={`${claim.package.name} · ${claim.package.quantity} ${claim.package.unit}`} />}
+    {claim.releasedAt && <DetailRow label={t('Released', 'Gihatag')} value={formatDateTime(claim.releasedAt)} />}
+    {claim.receipt && <DetailRow label={t('Receipt number', 'Numero sa resibo')} value={claim.receipt.number} />}
+    {claim.receipt && <DetailRow label={t('Receipt issued', 'Gihatag ang resibo')} value={formatDateTime(claim.receipt.issuedAt)} />}
+    {claim.needsReview && <Notice tone="warning">{t('Staff are reviewing this claim. Contact staff for its current status.', 'Gisusi pa sa staff kini nga claim. Kontaka ang staff alang sa kahimtang niini.')}</Notice>}
+  </>;
+}
+
 export function WalletScreen() {
   const { wallet, walletLoading, walletError, refreshWallet, t } = useDemo();
   const [selected, setSelected] = useState<WalletTransaction | null>(null);
   const entries = wallet?.transactions ?? [];
   const currentClaim = wallet?.currentClaim;
+  const claims = (wallet?.claims ?? []).filter(claim => claim.id !== currentClaim?.id);
   return (
     <Page tabs title={t('My Wallet', 'Akong Wallet')} back={false}>
       <Notice>
@@ -261,19 +277,20 @@ export function WalletScreen() {
             <Txt variant="small" style={s.cardCaption}>
               {t('RECORDED BALANCE', 'NAREKORD NGA BALANSE')}
             </Txt>
-            <Txt variant="number" style={{ color: c.card, fontSize: 34 }}>
-              {peso(wallet?.wallet?.balance ?? 0)}
+            <Txt variant={wallet?.wallet ? 'number' : 'label'} style={{ color: c.card, fontSize: wallet?.wallet ? 34 : 18 }}>
+              {wallet?.wallet ? peso(wallet.wallet.balance) : t('No wallet account yet', 'Wala pay wallet account')}
             </Txt>
           </View>
           {currentClaim ? (
             <Card>
-              <View style={[styles.row, { justifyContent: 'space-between' }]}>
+              <View style={[styles.row, { justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }]}>
                 <Txt variant="label">{t('Current claim', 'Kasamtangang claim')}</Txt>
-                <Badge>{formatStatus(currentClaim.status)}</Badge>
+                <Badge tone={currentClaim.needsReview || ['rejected', 'voided'].includes(currentClaim.status) ? 'error' : currentClaim.status === 'claimed' ? 'success' : 'warning'}>{formatClaimStatus(currentClaim.status, t, currentClaim.deliveryMode)}</Badge>
               </View>
               <DetailRow label={t('Program', 'Programa')} value={currentClaim.program.name} />
               <DetailRow label={t('Schedule', 'Iskedyul')} value={formatDate(currentClaim.date)} />
-              <DetailRow label={t('Amount', 'Kantidad')} value={peso(currentClaim.amount)} />
+              <DetailRow label={t('Recorded value', 'Narekord nga kantidad')} value={peso(currentClaim.amount)} />
+              <ClaimReleaseDetails claim={currentClaim} />
               {currentClaim.status === 'not_claimed' && (
                 <Txt variant="small">
                   {t(
@@ -304,6 +321,16 @@ export function WalletScreen() {
       )}
       {!walletError && (!walletLoading || !!wallet) && (
         <>
+          <Txt variant="label">{t('Claim history', 'Kasaysayan sa claim')}</Txt>
+          {claims.length ? claims.map(claim => <Card key={claim.id}>
+            <View style={[styles.row, { justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }]}>
+              <Txt variant="label" style={{ flexShrink: 1 }}>{claim.program.name}</Txt>
+              <Badge tone={claim.needsReview || ['rejected', 'voided'].includes(claim.status) ? 'error' : claim.status === 'claimed' ? 'success' : 'warning'}>{formatClaimStatus(claim.status, t, claim.deliveryMode)}</Badge>
+            </View>
+            <DetailRow label={t('Schedule', 'Iskedyul')} value={formatDate(claim.date)} />
+            <DetailRow label={t('Recorded value', 'Narekord nga kantidad')} value={peso(claim.amount)} />
+            <ClaimReleaseDetails claim={claim} />
+          </Card>) : <Notice>{t('No earlier claim records yet.', 'Wala pay miaging claim records.')}</Notice>}
           <View style={[styles.row, { justifyContent: 'space-between' }]}>
             <Txt variant="label">{t('Recent transactions', 'Bag-ong mga transaksyon')}</Txt>
             <Pressable
@@ -329,16 +356,17 @@ export function WalletScreen() {
                   onPress={() => setSelected(entry)}
                 >
                   <View style={{ flex: 1, gap: 4 }}>
-                    <Txt variant="label">{t('Aid received', 'Nadawat nga ayuda')}</Txt>
+                    <Txt variant="label">{formatTransactionType(entry.type, t)}</Txt>
                     <Txt variant="small">
                       {entry.program.name} · {formatDateTime(entry.createdAt)}
                     </Txt>
                     <Txt variant="small" style={{ fontSize: 10 }}>
                       {entry.reference}
                     </Txt>
+                    <Txt variant="small">{formatStatus(entry.status)}</Txt>
                   </View>
-                  <Txt variant="label" style={{ color: c.green, fontSize: 13 }}>
-                    +{peso(entry.amount)}
+                  <Txt variant="label" style={{ color: entry.amount < 0 ? c.error : c.text, fontSize: 13 }}>
+                    {signedPeso(entry.amount)}
                   </Txt>
                   <ChevronRight size={16} color={c.muted} />
                 </Pressable>
@@ -349,8 +377,8 @@ export function WalletScreen() {
               <Txt variant="label">{t('No wallet history yet', 'Wala pay wallet history')}</Txt>
               <Txt variant="small">
                 {t(
-                  'Recorded assistance will appear here after an authorized staff member completes a claim.',
-                  'Makita dinhi ang narekord nga ayuda human makompleto sa awtorisadong staff ang claim.',
+                  'Wallet credits appear here when staff record a ledger entry. Physical assistance appears in claim history.',
+                  'Makita dinhi ang wallet credits kon morekord ang staff. Ang pisikal nga ayuda makita sa kasaysayan sa claim.',
                 )}
               </Txt>
             </Card>
@@ -382,9 +410,9 @@ export function WalletScreen() {
             <View style={styles.row}>
               <CircleCheck size={36} color={c.green} />
               <View>
-                <Txt variant="label">{t('Aid received', 'Nadawat nga ayuda')}</Txt>
-                <Txt variant="heading" style={{ color: c.green }}>
-                  +{peso(selected?.amount || 0)}
+                <Txt variant="label">{selected ? formatTransactionType(selected.type, t) : t('Ledger entry', 'Narekord nga ayuda')}</Txt>
+                <Txt variant="heading" style={{ color: selected && selected.amount < 0 ? c.error : c.green }}>
+                  {signedPeso(selected?.amount || 0)}
                 </Txt>
               </View>
             </View>

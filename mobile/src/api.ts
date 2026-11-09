@@ -161,20 +161,18 @@ export type ClaimRecord = {
   date: string;
   amount: number;
   program: { id: string; code: string; name: string };
+  deliveryMode?: string;
+  verifiedAt?: string | null;
+  releasedAt?: string | null;
+  package?: { name: string; unit: string; quantity: number } | null;
+  receipt?: { number: string; issuedAt: string } | null;
+  needsReview?: boolean;
 };
 
-export type CurrentClaim = {
+export type CurrentClaim = Omit<ClaimRecord, 'id' | 'createdAt'> & {
   id: string | null;
-  distributionId: string;
-  scheduleId: string;
-  status: string;
-  verificationMethod: string | null;
-  claimedAt: string | null;
-  date: string;
   queueNumber: number;
   location: string;
-  amount: number;
-  program: { id: string; code: string; name: string };
 };
 
 export type WalletTransaction = {
@@ -291,7 +289,7 @@ export async function updateProfile(accessToken: string, input: ProfileUpdate) {
       body: JSON.stringify(input),
     })
   ).data;
-}
+} 
 
 export async function getBeneficiaryOverview(accessToken: string) {
   return (

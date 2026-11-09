@@ -1,0 +1,154 @@
+diff --git a/docs/mobile-claims-integration.md b/docs/mobile-claims-integration.md
+new file mode 100644
+index 0000000..dd9abc6
+--- /dev/null
++++ b/docs/mobile-claims-integration.md
+@@ -0,0 +1,20 @@
++# Mobile claim status and release history (phase 5)
++
++Apply `mobile-v4.patch` to backend `42b4552`, then `mobile-claims.patch`. No new dependencies or migrations are required. This local extension is not merged or deployed upstream.
++
++`GET /api/v1/mobile/beneficiaries/me/wallet` authenticates the existing beneficiary mobile session. Staff JWTs are rejected. Ownership is derived from the session, never a query parameter. The response is private/no-store and contains:
++
++- `wallet`: existing account ID, balance, currency, status and last transaction timestamp, or null. Reading does not create an account.
++- `currentClaim`: the earliest eligible published assignment selected by the existing overview rules, or null. Before verification its ID is null and status is `not_claimed`; amount comes from the allocation. A matching saved claim supplies its actual status.
++- `claims`: own saved claim history, including closed-event records. Each record has IDs, status, method, assigned Manila session date, actual allocation value, program ID/code/name, verification/claim/release timestamps, delivery mode, released package name/unit/quantity, receipt number/issue time, and a boolean review indicator.
++- `transactions`: own claim-linked BENEFIT_CREDIT/BENEFIT_REVERSAL ledger entries. Credit amounts are positive; reversals are negative. Transaction, wallet, claim, allocation and schedule ownership must match. Transfer history and wallet writes are outside this phase.
++
++Physical release is represented only as a claim and never synthesized as a wallet credit. VERIFIED means identity checks are complete; CLAIMED plus PHYSICAL_GOODS is shown as Released. PENDING, REJECTED and VOIDED are preserved. Receipt metadata identifies the staff receipt; the mobile app does not generate a staff receipt or expose its raw snapshot.
++
++Responses exclude QR credentials/hashes, biometrics, signatures, staff attribution/contact details, release notes/evidence references, dispute text and internal receipt snapshots. An active dispute or duplicate flag produces only `needsReview: true`. A repeatable-read transaction keeps the summary internally consistent. History is currently unpaginated; add cursor pagination before a large pilot.
++
++## Verify
++
++Run `npm.cmd run test:shared` from the mobile checkout against a separate migrated database (set DATABASE_URL to that test instance). The actual TypeScript client and Express API exercise unauthenticated/staff rejection, scheduled placeholders, QR-only VERIFIED versus combined PENDING, facilitator release, receipt issuance, closed history, staff status changes, review flags, signed synthetic ledger fixtures, owner isolation, DTO allowlists, no GET-created wallet, and logout. Synthetic ledger fixtures test read mapping; they are not a claim of end-to-end simulated settlement verification.
++
++For a manual check, sign in to mobile as the test beneficiary and open Wallet > Refresh records after staff release/receipt issuance. Claim history should show Released, the recorded package/quantity, release time and receipt number. A physical-only account may correctly have no wallet account or transactions. No real goods or funds move during this local test.
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index f7c63fe..e83a99e 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -7,6 +7,7 @@ import { beneficiaryDocumentParamsSchema } from "../documents/beneficiaryDocumen
+ import { downloadMobileDocument, listMobileDocuments, uploadMobileDocument } from "./mobileDocuments.controller.js";
+ import { getMobileOverview } from "./mobileOverview.service.js";
+ import { issueMobileClaimPass } from "./mobileClaimPass.service.js";
++import { getMobileWallet } from "./mobileWallet.service.js";
+ import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
+ import { mobileOtpRequestSchema, mobileOtpVerificationSchema, mobileProfileSchema, mobileRegistrationSchema } from "./mobile.schemas.js";
+ import { authenticateMobile, logoutMobile, mobileProfile, registerMobile, requestMobileOtp, updateMobileProfile, verifyMobileOtp } from "./mobile.service.js";
+@@ -41,6 +42,9 @@ mobileRoutes.get("/beneficiaries/me", (req, res) => {
+ mobileRoutes.get("/beneficiaries/me/overview", asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileOverview(req.mobileSession) });
+ }));
++mobileRoutes.get("/beneficiaries/me/wallet", asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileWallet(req.mobileSession) });
++}));
+ mobileRoutes.post("/beneficiaries/me/claim-pass", mobileAuthenticationRateLimiter, asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await issueMobileClaimPass(req.mobileSession) });
+ }));
+diff --git a/src/modules/mobile/mobileWallet.service.js b/src/modules/mobile/mobileWallet.service.js
+new file mode 100644
+index 0000000..72d9c4d
+--- /dev/null
++++ b/src/modules/mobile/mobileWallet.service.js
+@@ -0,0 +1,100 @@
++import prisma from "../../lib/prisma.js";
++import { distributionSlotToResponse } from "../distributions/distributionSlot.service.js";
++import { transactionSignedAmount } from "../wallets/wallet.service.js";
++import { getMobileOverview } from "./mobileOverview.service.js";
++
++const programSelect = { programId: true, programCode: true, programName: true };
++const program = value => ({ id: value.programId, code: value.programCode, name: value.programName });
++const iso = value => value?.toISOString() ?? null;
++const claimSelect = {
++  claimId: true, distributionId: true, scheduleId: true, claimStatus: true,
++  verificationMethod: true, verifiedAt: true, claimedAt: true, createdAt: true,
++  releaseMethod: true, releasedAt: true, releasedPackageName: true, releasedPackageUnit: true,
++  releasedQuantity: true, isDuplicateFlag: true,
++  allocation: { select: { amount: true } },
++  distribution: { select: { distributionDate: true, deliveryMode: true, program: { select: programSelect } } },
++  schedule: { select: { slot: { select: { slotStart: true, slotEnd: true } } } },
++  receipt: { select: { receiptNo: true, issuedAt: true } },
++  disputes: { where: { status: { in: ["OPEN", "UNDER_REVIEW", "REFERRED"] } }, select: { disputeId: true }, take: 1 },
++};
++
++function mobileClaim(claim) {
++  return {
++    id: claim.claimId, distributionId: claim.distributionId, scheduleId: claim.scheduleId,
++    status: claim.claimStatus.toLowerCase(), verificationMethod: claim.verificationMethod.toLowerCase(),
++    claimedAt: iso(claim.claimedAt), createdAt: iso(claim.createdAt), verifiedAt: iso(claim.verifiedAt),
++    date: distributionSlotToResponse(claim.schedule.slot).slotStart.slice(0, 10),
++    amount: Number(claim.allocation.amount), program: program(claim.distribution.program),
++    deliveryMode: (claim.releaseMethod ?? claim.distribution.deliveryMode).toLowerCase(),
++    releasedAt: iso(claim.releasedAt),
++    package: claim.releasedQuantity === null ? null : {
++      name: claim.releasedPackageName, unit: claim.releasedPackageUnit, quantity: claim.releasedQuantity,
++    },
++    receipt: claim.receipt ? { number: claim.receipt.receiptNo, issuedAt: iso(claim.receipt.issuedAt) } : null,
++    needsReview: claim.isDuplicateFlag || claim.disputes.length > 0,
++  };
++}
++
++// Read-only: physical goods remain claim records and never become wallet credits.
++export async function getMobileWallet(session) {
++  const beneficiaryId = session.account.beneficiaryId;
++  return prisma.$transaction(async tx => {
++    const ownClaim = { beneficiaryId, allocation: { beneficiaryId }, schedule: { beneficiaryId } };
++    const [wallet, claims, transactions, overview] = await Promise.all([
++      tx.walletAccount.findUnique({ where: { beneficiaryId }, select: {
++        walletId: true, balance: true, currency: true, accountStatus: true, lastTransactionAt: true,
++      } }),
++      // ponytail: own-account prototype history is unpaginated; add cursor pagination before a large pilot.
++      tx.claim.findMany({ where: ownClaim, select: claimSelect, orderBy: [{ updatedAt: "desc" }, { claimId: "desc" }] }),
++      tx.transaction.findMany({ where: {
++        beneficiaryId, wallet: { beneficiaryId }, claim: ownClaim,
++        transactionType: { in: ["BENEFIT_CREDIT", "BENEFIT_REVERSAL"] },
++      }, select: {
++        transactionId: true, claimId: true, amount: true, transactionType: true, referenceNo: true,
++        status: true, createdAt: true, claim: { select: {
++          claimStatus: true, claimedAt: true,
++          distribution: { select: { distributionDate: true, program: { select: programSelect } } },
++        } },
++      }, orderBy: [{ createdAt: "desc" }, { transactionId: "desc" }] }),
++      getMobileOverview(session, tx),
++    ]);
++    const history = claims.map(mobileClaim);
++    const schedule = overview.nextSchedule;
++    let currentClaim = null;
++    if (schedule) {
++      const record = history.find(claim => claim.scheduleId === schedule.id);
++      if (record) {
++        const { createdAt, ...current } = record;
++        currentClaim = { ...current, queueNumber: schedule.queueNumber, location: schedule.location };
++      } else {
++        const allocation = await tx.distributionAllocation.findFirstOrThrow({ where: {
++          beneficiaryId, distributionId: schedule.distributionId, allocationStatus: "ALLOCATED",
++          enrollment: { status: "APPROVED" },
++        }, select: { amount: true, distribution: { select: { deliveryMode: true } } } });
++        currentClaim = {
++          id: null, distributionId: schedule.distributionId, scheduleId: schedule.id,
++          status: "not_claimed", verificationMethod: null, claimedAt: null,
++          date: schedule.date, queueNumber: schedule.queueNumber, location: schedule.location,
++          amount: Number(allocation.amount), program: {
++            id: schedule.program.id, code: schedule.program.code, name: schedule.program.name,
++          },
++          deliveryMode: allocation.distribution.deliveryMode.toLowerCase(),
++          verifiedAt: null, releasedAt: null, package: null, receipt: null, needsReview: false,
++        };
++      }
++    }
++    return {
++      wallet: wallet ? { id: wallet.walletId, balance: Number(wallet.balance), currency: wallet.currency,
++        status: wallet.accountStatus.toLowerCase(), lastTransactionAt: iso(wallet.lastTransactionAt) } : null,
++      currentClaim, claims: history,
++      transactions: transactions.map(entry => ({
++        id: entry.transactionId, claimId: entry.claimId, amount: transactionSignedAmount(entry),
++        type: entry.transactionType.toLowerCase(), reference: entry.referenceNo,
++        status: entry.status.toLowerCase(), createdAt: iso(entry.createdAt),
++        claimStatus: entry.claim.claimStatus.toLowerCase(), claimedAt: iso(entry.claim.claimedAt),
++        date: entry.claim.distribution.distributionDate.toISOString().slice(0, 10),
++        program: program(entry.claim.distribution.program),
++      })),
++    };
++  }, { isolationLevel: "RepeatableRead" });
++}

@@ -1,0 +1,156 @@
+diff --git a/docs/mobile-qr-integration.md b/docs/mobile-qr-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc1b25bf19ce43c08345a58be923d6713f855be7
+--- /dev/null
++++ b/docs/mobile-qr-integration.md
+@@ -0,0 +1,25 @@
++# Beneficiary mobile QR claim passes
++
++Phase 4 adds authenticated `POST /api/v1/mobile/beneficiaries/me/claim-pass` after the overview patch. It accepts no beneficiary/distribution selection: the mobile session determines the owner and the overview selects their earliest eligible published schedule. The response is `{ success: true, data: { id, claimCode, status, issuedAt, expiresAt, schedule } }` with `Cache-Control: private, no-store`. Schedule dates, times and venue belong to the assigned session in Asia/Manila. No migration or dependency is added.
++
++The endpoint reuses overview eligibility, the staff verification-method check, and `qrClaimPreviewOutcome`. A first request can create the owner's credential for a QR-enabled distribution with approved enrollment and an active allocation/schedule. Reopening returns the same mobile-issued credential, without rotating it or changing staff records. A pending QR_AND_BIOMETRIC claim with completed biometrics and outstanding QR can still show its mobile-issued pass, matching the existing staff workflow. Other processed claims, USED/REVOKED/expired credentials, and ineligible schedules are blocked.
++
++Mobile credentials use a domain-separated HMAC-SHA256 over the random token-record UUID with the existing private `MOBILE_AUTH_SECRET`, encoded in the scanner's existing `gya1_` format. Only the scanner-compatible SHA-256 hash is stored. Raw credentials are returned only to the authenticated owner; they are not written to audit records or device storage. Keep that secret stable and shared between API instances. Rotating it invalidates the ability to reopen earlier mobile credentials as well as existing mobile sessions. Mobile authentication remains development-only until real SMS authentication is implemented.
++
++Existing staff-generated/reissued random credentials cannot be reconstructed from their hashes. The endpoint returns `CLAIM_PASS_STAFF_ISSUED` and directs the beneficiary to staff, preserving the existing credential. It never silently replaces an active staff pass, unrevokes a token, extends an expired token, or reissues a used token. Administrator revoke/reissue permissions and all staff scanning/verification/release policies are unchanged. This adds narrowly scoped beneficiary self-issuance; teammates must review it alongside the module list before shared deployment.
++
++The account/session lock and serializable transaction recheck authorization and protect concurrent requests. Conflicts return `QR_CLAIM_CONCURRENT_CHANGE` for retry. First issuance records a BENEFICIARY audit actor without a token. The auth rate limiter also bounds pass requests.
++
++## Verify
++
++Run `npm.cmd run test:shared` from the mobile repository against a separate migrated test database. The actual TypeScript client exercises initial/concurrent/repeated issuance, hashed storage and audit privacy, owner isolation, no-store responses, eligibility filters, expiry, non-QR policies, staff revocation/reissue, a synthetic biometric-first pending state, and actual staff QR verification. QR-first combined verification remains PENDING for biometrics; QR-only verification becomes VERIFIED. Neither path releases assistance or creates a wallet transaction. Staff idempotent retries and duplicate protection are checked. Fixtures are removed afterward.
++
++## Manual test
++
++1. Apply authentication, documents, overview, then this QR patch to the reviewed staff backend. Configure its private development mobile auth and database as described in the preceding guides.
++2. Authorized staff approve the beneficiary's enrollment, allocate assistance, assign an unexpired schedule, and OPEN a QR-enabled distribution. A full slot remains valid for its assigned beneficiary.
++3. Sign in on mobile, refresh Schedule, and choose Open my QR claim pass. Check program, assigned session date/time, venue, queue and expiry. Refreshing a mobile-issued pass keeps its credential. An account without an eligible assignment receives an unavailable state.
++4. Authorized staff scan the mobile pass in the correct distribution, review the preview and confirm using their existing workflow. QR_AND_BIOMETRIC still requires biometrics; verification does not itself release assistance. A repeated scan is handled by existing duplicate/idempotency protections.
++5. Before a pass is used, an administrator can revoke it. Mobile Refresh pass then explains the revocation. Staff reissue uses the separate staff-delivery path; mobile does not replace that credential. After expiry, the app hides its QR and offers refresh/contact staff.
++
++Automated HTTP/database checks do not prove physical camera scanning, Expo Go networking or native-device behavior. Shared mobile claim/wallet views and notifications remain later integration work. The staff frontend is unchanged.
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index bd84dafc716e924f0656feb70315556d17edd384..f7c63fe01063ba74f6c60dbeda7f651f266f79bc 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -6,6 +6,7 @@ import { uploadBeneficiaryDocument } from "../documents/beneficiaryDocument.uplo
+ import { beneficiaryDocumentParamsSchema } from "../documents/beneficiaryDocument.schemas.js";
+ import { downloadMobileDocument, listMobileDocuments, uploadMobileDocument } from "./mobileDocuments.controller.js";
+ import { getMobileOverview } from "./mobileOverview.service.js";
++import { issueMobileClaimPass } from "./mobileClaimPass.service.js";
+ import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
+ import { mobileOtpRequestSchema, mobileOtpVerificationSchema, mobileProfileSchema, mobileRegistrationSchema } from "./mobile.schemas.js";
+ import { authenticateMobile, logoutMobile, mobileProfile, registerMobile, requestMobileOtp, updateMobileProfile, verifyMobileOtp } from "./mobile.service.js";
+@@ -40,6 +41,9 @@ mobileRoutes.get("/beneficiaries/me", (req, res) => {
+ mobileRoutes.get("/beneficiaries/me/overview", asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileOverview(req.mobileSession) });
+ }));
++mobileRoutes.post("/beneficiaries/me/claim-pass", mobileAuthenticationRateLimiter, asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await issueMobileClaimPass(req.mobileSession) });
++}));
+ mobileRoutes.get("/beneficiaries/me/documents", listMobileDocuments);
+ mobileRoutes.post("/beneficiaries/me/documents", uploadBeneficiaryDocument, uploadMobileDocument);
+ mobileRoutes.post("/beneficiaries/me/documents/:documentId/replacement", validateParams(beneficiaryDocumentParamsSchema.pick({ documentId: true })), uploadBeneficiaryDocument, uploadMobileDocument);
+diff --git a/src/modules/mobile/mobileClaimPass.service.js b/src/modules/mobile/mobileClaimPass.service.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f0e322d679a64cddb058117f7ff262dbb6d5f10
+--- /dev/null
++++ b/src/modules/mobile/mobileClaimPass.service.js
+@@ -0,0 +1,71 @@
++import { randomUUID } from "node:crypto";
++import prisma from "../../lib/prisma.js";
++import { AppError } from "../../utils/AppError.js";
++import { hashQrToken, assertQrVerificationConfigured, qrClaimPreviewOutcome } from "../distributions/distributionClaim.service.js";
++import { getMobileOverview } from "./mobileOverview.service.js";
++import { hashMobileSecret, lockMobileSession } from "./mobile.service.js";
++
++// A domain-separated HMAC lets the owner reopen a mobile-issued credential;
++// only its SHA-256 hash is stored, using the existing staff scanner's format.
++function mobileQrCredential(qrTokenId) {
++  return `gya1_${Buffer.from(hashMobileSecret(`qr-claim-pass:v1:${qrTokenId}`), "hex").toString("base64url")}`;
++}
++
++export async function issueMobileClaimPass(session) {
++  try {
++    return await prisma.$transaction(async (tx) => {
++      const account = await lockMobileSession(tx, session);
++      const { nextSchedule: schedule } = await getMobileOverview(session, tx);
++      if (!schedule) throw new AppError(404, "CLAIM_PASS_UNAVAILABLE", "No eligible published schedule is assigned to your account.");
++      const beneficiaryId = account.beneficiaryId;
++      const distributionId = schedule.distributionId;
++      const distribution = await tx.distribution.findUniqueOrThrow({
++        where: { distributionId }, select: { verificationRequirement: true },
++      });
++      assertQrVerificationConfigured(distribution);
++      const claim = await tx.claim.findUnique({
++        where: { beneficiaryId_distributionId: { beneficiaryId, distributionId } },
++        select: { claimId: true, claimStatus: true, biometricVerified: true, qrVerified: true },
++      });
++      let qrToken = await tx.qrToken.findUnique({
++        where: { beneficiaryId_distributionId: { beneficiaryId, distributionId } },
++      });
++      if (!qrToken) {
++        const qrTokenId = randomUUID();
++        qrToken = await tx.qrToken.create({ data: {
++          qrTokenId, beneficiaryId, distributionId,
++          tokenHash: hashQrToken(mobileQrCredential(qrTokenId)), expiresAt: new Date(schedule.slotEnd),
++        } });
++        await tx.auditLog.create({ data: {
++          actorType: "BENEFICIARY", action: "MOBILE_QR_PASS_ISSUED", entityAffected: "QR_TOKEN", recordId: qrTokenId,
++          details: { source: "MOBILE_APP", beneficiaryId, distributionId },
++        } });
++      }
++      const outcome = qrClaimPreviewOutcome({
++        distribution, qrToken, schedule: { status: schedule.status.toUpperCase() },
++        allocation: { allocationStatus: "ALLOCATED" }, existingClaim: claim,
++      });
++      if (!outcome.ok) {
++        const code = ({ QR_TOKEN_REVOKED: "CLAIM_PASS_REVOKED", QR_TOKEN_EXPIRED: "CLAIM_PASS_EXPIRED" })[outcome.code]
++          ?? "CLAIM_PASS_PROCESSED";
++        throw new AppError(outcome.statusCode, code, outcome.message);
++      }
++      const claimCode = mobileQrCredential(qrToken.qrTokenId);
++      if (hashQrToken(claimCode) !== qrToken.tokenHash) {
++        throw new AppError(409, "CLAIM_PASS_STAFF_ISSUED", "Staff issued this credential separately. Ask them for your pass; the mobile app cannot replace it.");
++      }
++      const { id, date, slotStart, slotEnd, queueNumber, location, program } = schedule;
++      return {
++        id: qrToken.qrTokenId, claimCode, status: "active",
++        issuedAt: qrToken.createdAt.toISOString(), expiresAt: qrToken.expiresAt.toISOString(),
++        schedule: { id, distributionId, date, slotStart, slotEnd, queueNumber, location,
++          program: { id: program.id, code: program.code, name: program.name } },
++      };
++    }, { isolationLevel: "Serializable" });
++  } catch (error) {
++    if (["P2034", "P2002"].includes(error.code)) {
++      throw new AppError(409, "QR_CLAIM_CONCURRENT_CHANGE", "QR or claim data changed concurrently. Refresh and try again.");
++    }
++    throw error;
++  }
++}
+diff --git a/src/modules/mobile/mobileOverview.service.js b/src/modules/mobile/mobileOverview.service.js
+index e993f89bcc77b7c4ce068eb6b628ee139bfc7bf6..336f9f7735f6baf759e8cdda270358b6762501f9 100644
+--- a/src/modules/mobile/mobileOverview.service.js
++++ b/src/modules/mobile/mobileOverview.service.js
+@@ -14,10 +14,10 @@ function mobileProgram(program) {
+   };
+ }
+ 
+-export async function getMobileOverview(session) {
++export async function getMobileOverview(session, database = prisma) {
+   const beneficiaryId = session.account.beneficiaryId;
+   const [enrollments, schedule] = await Promise.all([
+-    prisma.enrollment.findMany({
++    database.enrollment.findMany({
+       where: { beneficiaryId },
+       select: {
+         enrollmentId: true, enrollmentDate: true, status: true,
+@@ -25,7 +25,7 @@ export async function getMobileOverview(session) {
+       },
+       orderBy: [{ enrollmentDate: "desc" }, { enrollmentId: "asc" }],
+     }),
+-    prisma.schedule.findFirst({
++    database.schedule.findFirst({
+       where: {
+         beneficiaryId, status: { in: ["SCHEDULED", "CHECKED_IN"] },
+         slot: { slotEnd: { gt: new Date() }, slotStatus: { not: "CLOSED" } },

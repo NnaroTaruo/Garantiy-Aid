@@ -2,7 +2,7 @@
 
 React Native + Expo beneficiary frontend built from Ronan's Figma mobile designs.
 
-The [shared-backend integration guide](docs/shared-backend-integration.md) covers registration/OTP/sessions/profiles, document intake/review/corrections, and assigned program/enrollment/schedule information through the staff backend. These are implemented and tested locally, with ordered patches for teammate review. Home and Enrollment status include refresh actions, staff feedback, and honest loading/error/empty states. Shared QR, wallet/claims, notifications, real SMS and biometrics remain pending. The default setup below uses the original mobile backend.
+The [shared-backend integration guide](docs/shared-backend-integration.md) covers registration/OTP/sessions/profiles, document intake/review/corrections, assigned enrollments/schedules, mobile-issued QR passes, and claim/release history through the staff backend. These are implemented and tested locally against staff version 4.0. Apply `mobile-v4.patch`, then `mobile-claims.patch`; earlier ordered patches target version 3. Wallet shows staff claim statuses, physical packages/quantities, release times, receipt numbers and existing claim-linked ledger credits/reversals. Missing wallet accounts are not displayed as zero balances. Shared notifications, transfer history, real SMS and biometrics remain pending. The default setup below uses the original mobile backend.
 
 ## Run in the browser
 

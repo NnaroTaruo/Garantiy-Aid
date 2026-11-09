@@ -113,6 +113,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const [documentsError, setDocumentsError] = useState(false);
   const documentRequest = useRef(0);
   const overviewRequest = useRef(0);
+  const walletRequest = useRef(0);
   const reset = async () => {
     sessionVersion.current += 1;
     setPhone('');
@@ -186,20 +187,21 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   };
   const loadWallet = async (token: string, version: number) => {
     if (!token || version !== sessionVersion.current) return;
+    const request = ++walletRequest.current;
     setWalletLoading(true);
     setWalletError(false);
     try {
       const nextWallet = await getWalletOverview(token);
-      if (version === sessionVersion.current) setWallet(nextWallet);
+      if (version === sessionVersion.current && request === walletRequest.current) setWallet(nextWallet);
     } catch (error) {
-      if (version !== sessionVersion.current) return;
+      if (version !== sessionVersion.current || request !== walletRequest.current) return;
       if (error instanceof ApiRequestError && error.status === 401) {
         await reset();
       } else {
         setWalletError(true);
       }
     } finally {
-      if (version === sessionVersion.current) setWalletLoading(false);
+      if (version === sessionVersion.current && request === walletRequest.current) setWalletLoading(false);
     }
   };
   const loadNotifications = async (token: string, version: number) => {
@@ -397,3 +399,4 @@ export const appointment = {
 };
 export const peso = (amount: number) =>
   `₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export const signedPeso = (amount: number) => `${amount > 0 ? '+' : amount < 0 ? '−' : ''}${peso(Math.abs(amount))}`;

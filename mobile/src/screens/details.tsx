@@ -35,7 +35,7 @@ import {
   styles,
   Txt,
 } from '../components';
-import { appointment as a, peso, useDemo } from '../state';
+import { appointment as a, peso, signedPeso, useDemo } from '../state';
 import { colors as c, fonts } from '../theme';
 import { ApiRequestError, getBarangays, issueClaimPass, MAX_DOCUMENT_BYTES, type Barangay, type Beneficiary, type ProfileUpdate, type BeneficiaryDocument, type DocumentType, type ClaimPass as ClaimPassData } from '../api';
 import {
@@ -44,6 +44,7 @@ import {
   formatQueueNumber,
   formatStatus,
   formatTimeSlot,
+  formatTransactionType,
 } from '../format';
 import { s as mainStyles } from './main';
 
@@ -225,13 +226,26 @@ function ClaimPass() {
   const [pass, setPass] = useState<ClaimPassData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiRequestError | null>(null);
-  const requested = useRef(false);
+  const [expired, setExpired] = useState(false);
+  const request = useRef(0);
+  const busyToken = useRef('');
+  const loadedToken = useRef('');
+  const currentToken = useRef(accessToken);
+  currentToken.current = accessToken;
   const load = async () => {
+    if (!accessToken || busyToken.current === accessToken) return;
+    busyToken.current = accessToken;
+    loadedToken.current = accessToken;
+    const version = ++request.current;
+    const current = () => version === request.current && currentToken.current === accessToken;
     setLoading(true);
     setError(null);
+    setPass(null);
     try {
-      setPass(await issueClaimPass(accessToken));
+      const nextPass = await issueClaimPass(accessToken);
+      if (current()) setPass(nextPass);
     } catch (caught) {
+      if (!current()) return;
       if (caught instanceof ApiRequestError && caught.status === 401) {
         await reset();
         router.replace('/');
@@ -243,37 +257,60 @@ function ClaimPass() {
           : new ApiRequestError('REQUEST_FAILED', 'The claim pass could not be issued.'),
       );
     } finally {
-      setLoading(false);
+      if (current()) {
+        busyToken.current = '';
+        setLoading(false);
+      }
     }
   };
   useEffect(() => {
-    if (!accessToken || requested.current) return;
-    requested.current = true;
     void load();
+    return () => { request.current++; busyToken.current = ''; };
   }, [accessToken]);
-  if (loading) {
+  useEffect(() => {
+    if (!pass) return;
+    const deadline = Date.parse(pass.expiresAt);
+    const check = () => setExpired(!Number.isFinite(deadline) || deadline <= Date.now());
+    check();
+    const timer = setInterval(check, 1000);
+    return () => clearInterval(timer);
+  }, [pass]);
+  const actions = <>
+    <Button variant="outline" onPress={() => void load()}>{t('Refresh pass', 'I-refresh ang pass')}</Button>
+    <Button variant="outline" onPress={() => go('schedule')}>
+      {t('Back to schedule', 'Balik sa iskedyul')}
+    </Button>
+  </>;
+  if (loading || loadedToken.current !== accessToken) {
     return <Notice>{t('Issuing your secure QR pass…', 'Gina-issue ang imong secure QR pass…')}</Notice>;
   }
   if (error) {
     const unavailable = error.code === 'CLAIM_PASS_UNAVAILABLE';
+    const messages: Record<string, string> = {
+      CLAIM_PASS_UNAVAILABLE: t('A QR pass is not available because you have no eligible published schedule.', 'Walay QR pass kay wala pay angay nga gipatik nga iskedyul.'),
+      CLAIM_PASS_REVOKED: t('Staff revoked this pass. Contact your facilitator before claiming.', 'Gibawi sa staff kini nga pass. Kontaka ang facilitator sa dili pa mag-claim.'),
+      CLAIM_PASS_PROCESSED: t('This pass was used or staff have started processing your claim. Ask staff for its status.', 'Nagamit na kini nga pass o gisugdan na sa staff ang imong claim. Pangutan-a ang staff sa kahimtang niini.'),
+      CLAIM_PASS_EXPIRED: t('This pass has expired. Contact staff to check your schedule.', 'Na-expire na kini nga pass. Kontaka ang staff aron masusi ang imong iskedyul.'),
+      CLAIM_PASS_STAFF_ISSUED: t('Staff issued your pass separately. Ask them for it; this app cannot replace it.', 'Gilain og hatag sa staff ang imong pass. Pangayoa kini sa staff; dili kini mapulihan sa app.'),
+      QR_NOT_REQUIRED: t('Your distribution uses another verification method. Follow staff instructions.', 'Lain nga paagi sa verification ang gigamit sa imong distribution. Sunda ang instruksyon sa staff.'),
+      QR_CLAIM_CONCURRENT_CHANGE: t('Your QR or claim record changed. Refresh the pass to check again.', 'Nausab ang imong QR o claim record. I-refresh ang pass aron masusi pag-usab.'),
+    };
     return (
       <>
         <Notice tone={unavailable ? 'warning' : 'error'}>
-          {unavailable
-            ? t(
-                'A QR pass is not available because you have no upcoming distribution schedule.',
-                'Walay QR pass kay wala pay umaabot nga distribution schedule.',
-              )
-            : t('Your QR pass could not be issued. Try again.', 'Wala ma-issue ang QR pass. Sulayi pag-usab.')}
+          {messages[error.code] ?? (error.status === 429
+            ? t('Too many requests. Wait and refresh the pass later.', 'Daghan ra nga hangyo. Paghulat ug i-refresh ang pass unya.')
+            : t('Your QR pass could not be loaded. Check your connection and refresh the pass.', 'Wala ma-load ang QR pass. Susihon ang koneksyon ug i-refresh ang pass.'))}
         </Notice>
-        {!unavailable ? <Button onPress={() => void load()}>{t('Try again', 'Sulayi pag-usab')}</Button> : null}
-        <Button variant="outline" onPress={() => go('schedule')}>
-          {t('Back to schedule', 'Balik sa iskedyul')}
-        </Button>
+        {actions}
       </>
     );
   }
   if (!pass) return null;
+  if (expired || Date.parse(pass.expiresAt) <= Date.now()) return <>
+    <Notice tone="warning">{t('This pass has expired. Refresh to check availability, or contact staff about your schedule.', 'Na-expire na kini nga pass. I-refresh aron masusi kon magamit pa, o kontaka ang staff bahin sa imong iskedyul.')}</Notice>
+    {actions}
+  </>;
   return (
     <>
       <Card style={{ alignItems: 'center' }}>
@@ -287,7 +324,7 @@ function ClaimPass() {
         >
           <QRCode
             value={pass.claimCode}
-            size={220}
+            size={200}
             color={c.navy}
             backgroundColor={c.card}
           />
@@ -303,13 +340,11 @@ function ClaimPass() {
       </Card>
       <Notice>
         {t(
-          `Show this pass only to authorized staff. It expires ${formatDateTime(pass.expiresAt)}. Staff record the result, then it appears in Wallet.`,
-          `Ipakita lamang kini sa awtorisadong staff. Ma-expire kini ${formatDateTime(pass.expiresAt)}. Ang staff maoy morekord sa resulta, dayon makita kini sa Wallet.`,
+          `Show this pass only to authorized staff. It expires ${formatDateTime(pass.expiresAt)}. Staff must complete the required verification before releasing assistance.`,
+          `Ipakita lamang kini sa awtorisadong staff. Ma-expire kini ${formatDateTime(pass.expiresAt)}. Kinahanglang makompleto sa staff ang gikinahanglang verification sa dili pa ihatag ang ayuda.`,
         )}
       </Notice>
-      <Button variant="outline" onPress={() => go('schedule')}>
-        {t('Back to schedule', 'Balik sa iskedyul')}
-      </Button>
+      {actions}
     </>
   );
 }
@@ -352,7 +387,7 @@ function Transactions() {
               {t('RECORDED BALANCE', 'NAREKORD NGA BALANSE')}
             </Txt>
             <Txt variant="heading" style={{ fontSize: 26, color: c.card }}>
-              {peso(wallet?.wallet?.balance ?? 0)}
+              {wallet?.wallet ? peso(wallet.wallet.balance) : t('No wallet account yet', 'Wala pay wallet account')}
             </Txt>
           </View>
           <Txt variant="small" style={{ fontFamily: fonts.semibold }}>
@@ -372,19 +407,20 @@ function Transactions() {
                   ]}
                 >
                   <View style={{ flex: 1, gap: 4 }}>
-                    <Txt variant="label">{t('Aid received', 'Nadawat nga ayuda')}</Txt>
+                    <Txt variant="label">{formatTransactionType(entry.type, t)}</Txt>
                     <Txt variant="small">
                       {entry.program.name} · {formatDateTime(entry.createdAt)}
                     </Txt>
                     <Txt variant="small" style={{ fontSize: 10 }}>
                       {entry.reference}
                     </Txt>
+                    <Txt variant="small">{formatStatus(entry.status)}</Txt>
                   </View>
                   <Txt
                     variant="small"
-                    style={{ color: c.green, fontFamily: fonts.semibold }}
+                    style={{ color: entry.amount < 0 ? c.error : c.text, fontFamily: fonts.semibold }}
                   >
-                    +{peso(entry.amount)}
+                    {signedPeso(entry.amount)}
                   </Txt>
                   {selectedId === entry.id && <Check size={18} color={c.primary} />}
                 </Pressable>
@@ -395,8 +431,8 @@ function Transactions() {
               <Txt variant="label">{t('No wallet history yet', 'Wala pay wallet history')}</Txt>
               <Txt variant="small">
                 {t(
-                  'Recorded assistance will appear here after an authorized staff member completes a claim.',
-                  'Makita dinhi ang narekord nga ayuda human makompleto sa awtorisadong staff ang claim.',
+                  'Wallet credits appear here when staff record a ledger entry. Physical assistance appears in claim history.',
+                  'Makita dinhi ang wallet credits kon morekord ang staff. Ang pisikal nga ayuda makita sa kasaysayan sa claim.',
                 )}
               </Txt>
             </Card>
@@ -457,9 +493,9 @@ function Receipt() {
       <View style={styles.row}>
         <CircleCheck color={c.green} size={40} />
         <View>
-          <Txt variant="label">{t('Aid received', 'Nadawat nga ayuda')}</Txt>
-          <Txt variant="title" style={{ color: c.green }}>
-            +{peso(entry.amount)}
+          <Txt variant="label">{formatTransactionType(entry.type, t)}</Txt>
+          <Txt variant="title" style={{ color: entry.amount < 0 ? c.error : c.green }}>
+            {signedPeso(entry.amount)}
           </Txt>
         </View>
       </View>

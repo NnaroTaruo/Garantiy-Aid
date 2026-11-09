@@ -1,0 +1,1492 @@
+diff --git a/.env.example b/.env.example
+index 15088c59a6377e0193db2de7332bfa5adbf051f9..f083b2d1c2425d1b986c3f6a0720df5f947f2979 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,14 +1,22 @@
+ NODE_ENV=development
+ PORT=4000
+-CORS_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
++CORS_ORIGIN=http://localhost:5173,http://127.0.0.1:5173,http://localhost:8765,http://127.0.0.1:8765
+ DATABASE_URL=postgresql://garantiyaid_app:replace-with-a-strong-password@localhost:5432/garantiyaid
+ # Absolute private persistent volume path in deployment. Blank uses ./uploads locally.
+ UPLOAD_ROOT=
++# Use 1 with the embedded Prisma development database; regular PostgreSQL defaults to 10.
++DATABASE_POOL_MAX=10
+ JWT_ACCESS_SECRET=replace-with-at-least-64-random-characters
+ # Local/Postman development convenience. Change to 15m before production deployment.
+ JWT_ACCESS_EXPIRES_IN=24h
+ JWT_ISSUER=garantiyaid-api
+ JWT_AUDIENCE=garantiyaid-staff
++# Beneficiary OTP is opt-in and development-only until an SMS provider is implemented.
++MOBILE_AUTH_MODE=DISABLED
++# Generate a separate secret: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
++# MOBILE_AUTH_SECRET=
++# Optional private document directory. Default: uploads/beneficiary-documents relative to the API working directory.
++# DOCUMENT_STORAGE_DIR=
+ FIELD_ENCRYPTION_KEY=replace-with-exactly-64-hexadecimal-characters
+ 
+ # Set to the exact number of trusted reverse proxies in production.
+diff --git a/docs/mobile-auth-integration.md b/docs/mobile-auth-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..be5a20a02b9afdc30c379cd54fd060b0d3daf998
+--- /dev/null
++++ b/docs/mobile-auth-integration.md
+@@ -0,0 +1,54 @@
++# Beneficiary mobile authentication: phase 1
++
++Initially based on backend commit `050c389e7b75a2d0aa06fcb0eff7199c32bb1d6c`; reconciled with version 4.0 (`42b4552`) on November 9, 2026. Use the consolidated mobile-v4 patch for that base, as described in [mobile-v4-integration.md](mobile-v4-integration.md). Mobile accounts use the staff backend's existing Beneficiary and Barangay tables. Staff authentication and the staff frontend are unchanged by the mobile extension.
++
++## Setup
++
++1. Install existing dependencies with `npm ci`; preserve your existing `.env`.
++2. First test on a separate development PostgreSQL instance. Do not apply this schema to the older mobile database. Embedded Prisma does not isolate data by database URL path; use a separate named server and port or a real PostgreSQL database.
++3. Set `MOBILE_AUTH_MODE=DEVELOPMENT` and generate a separate `MOBILE_AUTH_SECRET` with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Keep it private. Unconfigured mobile auth returns 503. DEVELOPMENT mode is rejected in production; real SMS is not connected.
++4. Add the Expo browser origins on port 8765 to `CORS_ORIGIN`. Use `DATABASE_POOL_MAX=1` for embedded Prisma; regular PostgreSQL defaults to 10.
++5. Run `npm run prisma:generate` and `npm run prisma:migrate:deploy`. The two new migrations add mobile accounts/challenges/sessions and allow beneficiary audit actors. Existing staff data and permissions remain.
++6. Start your normal API with `npm run dev`. The full staff server retains its existing Redis/worker setup; mobile auth/profile themselves do not need Redis. Registration requires active Barangay records.
++
++## API
++
++The browser base URL is `http://127.0.0.1:4000/api/v1/mobile`. Use `10.0.2.2` for the Android emulator or the computer's reachable LAN IP for Expo Go. Use HTTPS for a future hosted service. This is the backend URL, not the Vercel frontend or GitHub repository.
++
++| Method | Path relative to the mobile base | Contract |
++| --- | --- | --- |
++| GET | `/barangays` | Public active service areas: `{ data: [{ id, barangayCode, barangayName, city, province }] }`. |
++| POST | `/auth/register` | Strict first/middle/last name, YYYY-MM-DD birthDate, female/male/prefer_not_to_say sex, address, barangayId, contactNumber. Returns 201 with `{ data: { beneficiary, verificationRequired: true, expiresInSeconds, developmentOtp } }`. |
++| POST | `/auth/otp/request` | `{ contactNumber, purpose: "register" or "login" }`; returns 202 with the development code. |
++| POST | `/auth/otp/verify` | Same fields plus six-digit code. Returns `{ data: { accessToken, tokenType: "Bearer", expiresAt, beneficiary } }`. |
++| GET | `/beneficiaries/me` | Own profile from the bearer session; also restores login. |
++| PATCH | `/beneficiaries/me` | Own names/address/barangay only; returns confirmed normalized profile. |
++| POST | `/auth/logout` | Revokes the presented mobile session; returns 204. |
++
++Profile fields match mobile: id, firstName, middleName, lastName, birthDate, sex, address, barangayId, contactNumber, isVerified, status. New `phoneVerified` describes phone ownership; `isVerified` retains the staff Beneficiary value. OTP never approves identity, eligibility, or enrollment. Registration creates no program, wallet, or claim. Prefer-not-to-say maps to staff UNKNOWN and maps back for mobile.
++
++Login numbers are normalized and unique in BeneficiaryMobileAccount. Staff contact numbers remain nullable/nonunique. The mobile profile contact is its login number; a staff contact edit does not silently change credentials. Existing matching staff records return ACCOUNT_LINK_REQUIRED rather than automatically linking by name or phone. Authorized linking, recovery, phone changes, and shared-family-number access require a separate workflow.
++
++OTPs expire in five minutes with five guesses, a one-minute per-account resend cooldown, and an IP limiter. An account row lock serializes issue/verification, preventing simultaneous code reuse and guess-limit bypass. OTP hashes bind to their challenge IDs. Tokens/codes are hashed at rest; raw codes are returned only in explicit development mode, never logged or put on the simulated SMS queue. Sessions expire after seven days; staff suspension invalidates access. Staff JWTs and mobile tokens are not interchangeable.
++
++Validation errors use shared `error.details.fields: [{ field, message }]`; the mobile API adapter normalizes these for its forms. Schema errors return 400; inactive barangay 422; duplicate/link conflict 409; cooldown/guess limits 429; invalid/revoked/expired session 401.
++
++## Checks
++
++```powershell
++npm test
++npm run prisma:validate
++$env:RUN_MOBILE_DB_TESTS='1'
++$env:AUTH_RATE_LIMIT_PER_15_MINUTES='100'
++npm run test:mobile:integration
++```
++
++The explicit integration test creates/removes synthetic barangays, staff sessions/users, beneficiary accounts, OTPs, sessions, and audits. It checks staff visibility, profile edits, code reuse, persisted failed attempts, expiry/guess limits, account isolation, suspension, logout/relogin, and CORS. The higher request limit applies to the test process only. Embedded Prisma requires DATABASE_POOL_MAX=1 to avoid a multiplexed prepared-statement limitation; this is not a multi-instance throughput test.
++
++The mobile repository's `npm run test:shared` additionally calls this API through the actual TypeScript mobile API module with real HTTP/database requests. Neither suite is a physical-device or browser-layout check.
++
++Prisma's full database/schema comparison reports inherited FK actions, index/constraint names, and updated_at defaults in older staff tables. Comparing the original schema to this feature's schema changes only the three mobile auth tables. The new auth tables match their migrations; no migration was added to rewrite unrelated staff schema history. Review that existing drift separately before a production rollout.
++
++## Remaining integration
++
++Account access/profile are connected under this prefix. [Phase 2](mobile-documents-integration.md) adds private documents, staff review results, and corrected uploads. Overview, schedules, QR, wallet/claims, notifications, and help require later shared endpoints. Their mobile screens show request errors until implemented; do not hide this with invented empty records or a fallback to another database. Old mobile tokens/data are not automatically migrated.
+diff --git a/docs/mobile-documents-integration.md b/docs/mobile-documents-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..51c79365b041acc9070ac77cabd393999ad4c164
+--- /dev/null
++++ b/docs/mobile-documents-integration.md
+@@ -0,0 +1,43 @@
++# Beneficiary document intake and staff review
++
++Phase 2 originally built on beneficiary authentication commit `ce3ddc5` and staff backend `050c389`. For version 4.0 (`42b4552`), use the consolidated mobile-v4 patch instead of the old ordered phase patches. Staff review URLs/role checks are preserved; the staff frontend reads the same BeneficiaryDocument records.
++
++## Setup
++
++Run `npm run prisma:generate` and `npm run prisma:migrate:deploy`. Migration `20261103000100_allow_beneficiary_document_uploads` makes uploaded_by nullable and adds uploaded_by_beneficiary. A database check requires exactly one uploader: a staff User, or the beneficiary who owns the document. Existing staff attribution is preserved; mobile never impersonates staff.
++
++Files remain private under UPLOAD_ROOT/beneficiary-documents (default: uploads/beneficiary-documents relative to the API working directory). Optional DOCUMENT_STORAGE_DIR overrides that document directory for isolated tests. Back up files and PostgreSQL together. Persistent shared storage, malware scanning, crash/orphan recovery, and retention/deletion jobs remain separate work. Never expose the directory as a public static route. Tests use fresh temporary directories and synthetic files.
++
++## API
++
++All paths below are relative to `/api/v1/mobile` and require a beneficiary bearer token. Ownership comes from the session.
++
++| Method | Path | Behavior |
++| --- | --- | --- |
++| GET | `/beneficiaries/me/documents` | Own records, newest first, including review decisions and corrected versions. |
++| POST | `/beneficiaries/me/documents` | Multipart documentType and one file named file. Returns 201 for new files; identical content/category/account returns the existing record and its current status with 200. |
++| POST | `/beneficiaries/me/documents/:documentId/replacement` | Same fields. An owned REJECTED file can be corrected using its original category. Creates a SUBMITTED record and marks the original SUPERSEDED. Repeated identical corrections return the same record; conflicts return 409. |
++| GET | `/beneficiaries/me/documents/:documentId/content` | Owner-only attachment, private/no-store, nosniff. Other accounts receive 404. File-viewing UI is not part of this milestone. |
++
++Use FormData and let fetch generate the Content-Type boundary. The original mobile backend's raw-byte protocol is not accepted here. PDF/JPEG/PNG are allowed up to 5 MiB (shown as 5 MB). Type is detected from bytes. Multipart requests allow one file, one category field, and an optional documentName. UTF-8 filenames are decoded for both staff and mobile, with legacy-name fallback. Removed records are excluded from lists, downloads and duplicate matching. Corrections inherit the original Other requirement's name and reject conflicting names; the current mobile form still offers generic categories.
++
++Public fields: id, docType (lowercase), originalName, mimeType, sizeBytes, createdAt, status, reviewNotes, reviewedAt, replacesDocumentId, canReplace. Mappings: SUBMITTED -> received, ACCEPTED -> accepted, REJECTED -> rejected, SUPERSEDED -> superseded. Paths, hashes, staff identities, and uploader IDs stay private. Notes are displayed exactly as entered; switching interface language does not invent a translation.
++
++Existing staff list/review routes remain `/api/v1/beneficiaries/:beneficiaryId/documents` and `POST /api/v1/beneficiaries/:beneficiaryId/documents/:documentId/review`. DSWD Staff and System Administrators can review; mobile tokens cannot review their own documents. Document acceptance does not approve enrollment or verify identity.
++
++An account row lock serializes mobile retries. The session is rechecked after file receipt inside the write transaction, so finishing an upload after logout cannot create a document. Duplicate/rejected/failed writes clean up the new file. Correction transitions reuse staff validation and conditionally update the old status to protect against concurrent staff decisions. This covers normal errors, not process-crash recovery.
++
++## Verify
++
++```powershell
++npm test
++npm run prisma:validate
++$env:RUN_MOBILE_DB_TESTS='1'
++$env:AUTH_RATE_LIMIT_PER_15_MINUTES='100'
++npm run test:mobile:integration
++npm run test:mobile:documents
++```
++
++The document suite checks invalid/oversized/spoofed input cleanup, exact downloads, ownership, staff review visibility, database uploader constraints, simultaneous retries/corrections, unchanged eligibility, and logout during a streamed upload. Fixtures/files are removed afterward. The mobile repository's `npm run test:shared` also exercises uploads and rejection/correction/acceptance through its actual API module.
++
++The form retains failed selections, locks the category during correction, shows status/notes, and marks the old document replaced only after server confirmation. English/Bisaya and native/web request construction have automated checks. Android file-provider behavior and a complete browser/native visual walkthrough remain unverified.
+diff --git a/docs/mobile-overview-integration.md b/docs/mobile-overview-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e896ffc5a201c4cf775b3ac5808dc3160e397067
+--- /dev/null
++++ b/docs/mobile-overview-integration.md
+@@ -0,0 +1,24 @@
++# Beneficiary program enrollment and assigned schedule
++
++Phase 3 adds `GET /api/v1/mobile/beneficiaries/me/overview` after the authentication and document patches. It uses the existing beneficiary mobile session and tables; no migration or dependencies are added.
++
++The response is `{ success: true, data: { enrollments, nextSchedule } }`, with `Cache-Control: private, no-store`. The authenticated account determines ownership; supplied beneficiary IDs do not change the account being read. Staff JWTs cannot authenticate to this route.
++
++Each enrollment contains `id`, `enrollmentDate` (YYYY-MM-DD), lowercase `status`, `reviewNotes`, nullable ISO `reviewedAt`, and `program`. Program fields are `id`, `code`, `name`, `type`, `description`, and numeric or null `grantAmount`. A missing grant stays null. All saved enrollment statuses are returned, including correction requests, rejection, suspension, and withdrawal. Staff IDs, other beneficiaries, eligibility snapshots, program budgets, and internal criteria are excluded.
++
++`nextSchedule` is null until staff publish an eligible assignment. Otherwise it contains `id`, `distributionId`, `title`, `date`, `slotStart`, `slotEnd`, `queueNumber`, `status`, `location`, and `program`. It selects the earliest unexpired SCHEDULED/CHECKED_IN assignment in an OPEN distribution with an ACTIVE program and an ALLOCATED allocation linked to an APPROVED enrollment. Closed slots are hidden; FULL slots remain visible to their assigned beneficiary. Dates and times come from the assigned session in Asia/Manila, and the venue comes from that slot, including sessions on another day or at another venue. Cancelled/missed schedules, cancelled/claimed allocations, inactive programs, and draft/closed/cancelled distributions are hidden.
++
++The endpoint is read-only. It does not approve enrollment, assign a program, generate or change slots, publish an event, verify identity, issue QR credentials, release a claim, or credit a wallet. Existing staff permissions and independent enrollment review remain in effect. Mobile currently views its own assigned programs; a general program catalog is separate work.
++
++## Verify
++
++From the mobile repository, run `npm.cmd run test:shared` with `DATABASE_URL` set to a separate migrated test PostgreSQL instance and the local shared backend configured for development mobile authentication. The test exercises the actual mobile TypeScript client and HTTP API: staff submission, review/correction/resubmission/approval, draft scheduling, rescheduling, publication, earliest selection, account isolation, hidden ineligible records, local session dates/venues, nullable amounts, private DTOs, and logout. It also checks the preceding account/profile/document workflow and removes its synthetic fixtures. Keep embedded Prisma tests separate from the browser instance.
++
++## Manual browser check
++
++1. Sign in on mobile and refresh Home and Profile > Enrollment status. An unassigned account shows empty states.
++2. An authorized administrator/facilitator submits that beneficiary to an active program using the staff web. A different authorized reviewer starts review and requests corrections or approves it. Refresh mobile status to see the decision, exact feedback, and review time.
++3. Authorized staff prepare a draft distribution, its sessions and allocations, then assign or reschedule the approved beneficiary while the event is still draft. The mobile schedule stays empty during preparation.
++4. Staff open the distribution after its readiness checks pass. Tap Refresh schedule on mobile; check the session's date, time, venue and queue number against the staff record.
++
++QR issuance, wallet/claims, shared notifications, real SMS and biometric matching are later mobile integration work. API/build checks and controlled browser screenshots do not replace a physical Android walkthrough or this complete manual staff scheduling test.
+diff --git a/docs/mobile-qr-integration.md b/docs/mobile-qr-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc1b25bf19ce43c08345a58be923d6713f855be7
+--- /dev/null
++++ b/docs/mobile-qr-integration.md
+@@ -0,0 +1,25 @@
++# Beneficiary mobile QR claim passes
++
++Phase 4 adds authenticated `POST /api/v1/mobile/beneficiaries/me/claim-pass` after the overview patch. It accepts no beneficiary/distribution selection: the mobile session determines the owner and the overview selects their earliest eligible published schedule. The response is `{ success: true, data: { id, claimCode, status, issuedAt, expiresAt, schedule } }` with `Cache-Control: private, no-store`. Schedule dates, times and venue belong to the assigned session in Asia/Manila. No migration or dependency is added.
++
++The endpoint reuses overview eligibility, the staff verification-method check, and `qrClaimPreviewOutcome`. A first request can create the owner's credential for a QR-enabled distribution with approved enrollment and an active allocation/schedule. Reopening returns the same mobile-issued credential, without rotating it or changing staff records. A pending QR_AND_BIOMETRIC claim with completed biometrics and outstanding QR can still show its mobile-issued pass, matching the existing staff workflow. Other processed claims, USED/REVOKED/expired credentials, and ineligible schedules are blocked.
++
++Mobile credentials use a domain-separated HMAC-SHA256 over the random token-record UUID with the existing private `MOBILE_AUTH_SECRET`, encoded in the scanner's existing `gya1_` format. Only the scanner-compatible SHA-256 hash is stored. Raw credentials are returned only to the authenticated owner; they are not written to audit records or device storage. Keep that secret stable and shared between API instances. Rotating it invalidates the ability to reopen earlier mobile credentials as well as existing mobile sessions. Mobile authentication remains development-only until real SMS authentication is implemented.
++
++Existing staff-generated/reissued random credentials cannot be reconstructed from their hashes. The endpoint returns `CLAIM_PASS_STAFF_ISSUED` and directs the beneficiary to staff, preserving the existing credential. It never silently replaces an active staff pass, unrevokes a token, extends an expired token, or reissues a used token. Administrator revoke/reissue permissions and all staff scanning/verification/release policies are unchanged. This adds narrowly scoped beneficiary self-issuance; teammates must review it alongside the module list before shared deployment.
++
++The account/session lock and serializable transaction recheck authorization and protect concurrent requests. Conflicts return `QR_CLAIM_CONCURRENT_CHANGE` for retry. First issuance records a BENEFICIARY audit actor without a token. The auth rate limiter also bounds pass requests.
++
++## Verify
++
++Run `npm.cmd run test:shared` from the mobile repository against a separate migrated test database. The actual TypeScript client exercises initial/concurrent/repeated issuance, hashed storage and audit privacy, owner isolation, no-store responses, eligibility filters, expiry, non-QR policies, staff revocation/reissue, a synthetic biometric-first pending state, and actual staff QR verification. QR-first combined verification remains PENDING for biometrics; QR-only verification becomes VERIFIED. Neither path releases assistance or creates a wallet transaction. Staff idempotent retries and duplicate protection are checked. Fixtures are removed afterward.
++
++## Manual test
++
++1. Apply authentication, documents, overview, then this QR patch to the reviewed staff backend. Configure its private development mobile auth and database as described in the preceding guides.
++2. Authorized staff approve the beneficiary's enrollment, allocate assistance, assign an unexpired schedule, and OPEN a QR-enabled distribution. A full slot remains valid for its assigned beneficiary.
++3. Sign in on mobile, refresh Schedule, and choose Open my QR claim pass. Check program, assigned session date/time, venue, queue and expiry. Refreshing a mobile-issued pass keeps its credential. An account without an eligible assignment receives an unavailable state.
++4. Authorized staff scan the mobile pass in the correct distribution, review the preview and confirm using their existing workflow. QR_AND_BIOMETRIC still requires biometrics; verification does not itself release assistance. A repeated scan is handled by existing duplicate/idempotency protections.
++5. Before a pass is used, an administrator can revoke it. Mobile Refresh pass then explains the revocation. Staff reissue uses the separate staff-delivery path; mobile does not replace that credential. After expiry, the app hides its QR and offers refresh/contact staff.
++
++Automated HTTP/database checks do not prove physical camera scanning, Expo Go networking or native-device behavior. Shared mobile claim/wallet views and notifications remain later integration work. The staff frontend is unchanged.
+diff --git a/docs/mobile-v4-integration.md b/docs/mobile-v4-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8219dbeb4980a0c4d3f69ab64776c303197f1c9b
+--- /dev/null
++++ b/docs/mobile-v4-integration.md
+@@ -0,0 +1,13 @@
++# Mobile compatibility with staff version 4.0
++
++Reconciled on November 9, 2026 with backend `42b4552` and frontend `f6dfcdf`. The mobile repository's consolidated `integrations/shared-backend/mobile-v4.patch` applies directly to this backend base and contains all four mobile phases. Do not also apply the older version-3 phase patches.
++
++The shared backend retains the upstream transaction-aware PostgreSQL adapter, deployment upload root, stricter physical-package requirements, alternative QR-or-biometric verification, document names, and staff document removal. The mobile pool-size setting remains available for the embedded development database. Existing private environment values and mobile QR signing secrets must be preserved.
++
++Mobile document lists and owner downloads exclude staff-removed records. Removed documents do not intercept upload retries. Corrections retain the original named Other requirement and reject a conflicting name. The shared multipart intake permits the category, optional document name, and one file; staff named-document uploads still work. The current mobile form offers generic categories; selecting individual named Other requirements remains later UI work.
++
++Use `npm ci`, `npm run prisma:generate`, and `npm run prisma:migrate:deploy`. First apply migrations and run checks on a separate development test database. Preserve existing account records, private configuration and uploaded files; do not reset or reseed an existing database. The eight upstream version-4 migrations add claim verification timestamps, package evidence, referrals, named documents, removal status, alternative verification, and a wider email-provider constraint. The three mobile migrations remain unchanged.
++
++Run `npm test`, `npm run prisma:validate`, and the mobile authentication/document database suites. Use `--test-concurrency=1` when running the two database suite files together against embedded Prisma. The mobile repository's `npm run test:shared` verifies the actual client, enrollment review, scheduling, QR issuance/reopening, staff verification, and session isolation. Physical assistance test events now require a package name, unit, and quantity before opening. QR_OR_BIOMETRIC accepts QR alone; QR_AND_BIOMETRIC still needs both checks. Neither QR step itself releases assistance or credits a wallet.
++
++The old November 7 local test pass is expired. Create a new distribution with a future session and package details for the pending manual facilitator test. Existing administrator/reviewer accounts and authenticator enrollment are preserved. Source updates do not import a teammate's database or connect to their hosted environment.
+diff --git a/package.json b/package.json
+index 9067fc24cc271e98271765da2bcf8a9cda9c8bca..ef1095de2c38b55c54186014283eb6a240d8c8f5 100644
+--- a/package.json
++++ b/package.json
+@@ -8,6 +8,8 @@
+   "main": "index.js",
+   "scripts": {
+     "test": "node --test",
++    "test:mobile:integration": "node --test test/mobile-auth.integration.js",
++    "test:mobile:documents": "node --test test/mobile-documents.integration.js",
+     "dev": "node --watch --watch-preserve-output src/server.js",
+     "start": "node src/server.js",
+     "worker:notifications": "node src/workers/notification.worker.js",
+diff --git a/prisma/migrations/20261030000100_add_beneficiary_mobile_auth/migration.sql b/prisma/migrations/20261030000100_add_beneficiary_mobile_auth/migration.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..681d59339d2ba85ee4f3645a9052dba3d2def3da
+--- /dev/null
++++ b/prisma/migrations/20261030000100_add_beneficiary_mobile_auth/migration.sql
+@@ -0,0 +1,39 @@
++CREATE TABLE "beneficiary_mobile_accounts" (
++  "account_id" UUID NOT NULL,
++  "beneficiary_id" UUID NOT NULL,
++  "contact_number" VARCHAR(20) NOT NULL,
++  "verified_at" TIMESTAMPTZ(6),
++  "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++  "updated_at" TIMESTAMPTZ(6) NOT NULL,
++  CONSTRAINT "beneficiary_mobile_accounts_pkey" PRIMARY KEY ("account_id")
++);
++CREATE UNIQUE INDEX "beneficiary_mobile_accounts_beneficiary_id_key" ON "beneficiary_mobile_accounts"("beneficiary_id");
++CREATE UNIQUE INDEX "beneficiary_mobile_accounts_contact_number_key" ON "beneficiary_mobile_accounts"("contact_number");
++ALTER TABLE "beneficiary_mobile_accounts" ADD CONSTRAINT "beneficiary_mobile_accounts_beneficiary_id_fkey" FOREIGN KEY ("beneficiary_id") REFERENCES "beneficiaries"("beneficiary_id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++CREATE TABLE "beneficiary_mobile_otps" (
++  "challenge_id" UUID NOT NULL,
++  "account_id" UUID NOT NULL,
++  "purpose" VARCHAR(10) NOT NULL,
++  "code_hash" CHAR(64) NOT NULL,
++  "attempts_remaining" INTEGER NOT NULL DEFAULT 5,
++  "expires_at" TIMESTAMPTZ(6) NOT NULL,
++  "consumed_at" TIMESTAMPTZ(6),
++  "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++  CONSTRAINT "beneficiary_mobile_otps_pkey" PRIMARY KEY ("challenge_id")
++);
++CREATE INDEX "beneficiary_mobile_otps_account_id_created_at_idx" ON "beneficiary_mobile_otps"("account_id", "created_at");
++ALTER TABLE "beneficiary_mobile_otps" ADD CONSTRAINT "beneficiary_mobile_otps_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "beneficiary_mobile_accounts"("account_id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++CREATE TABLE "beneficiary_mobile_sessions" (
++  "session_id" UUID NOT NULL,
++  "account_id" UUID NOT NULL,
++  "token_hash" CHAR(64) NOT NULL,
++  "expires_at" TIMESTAMPTZ(6) NOT NULL,
++  "revoked_at" TIMESTAMPTZ(6),
++  "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++  CONSTRAINT "beneficiary_mobile_sessions_pkey" PRIMARY KEY ("session_id")
++);
++CREATE UNIQUE INDEX "beneficiary_mobile_sessions_token_hash_key" ON "beneficiary_mobile_sessions"("token_hash");
++CREATE INDEX "beneficiary_mobile_sessions_account_id_expires_at_idx" ON "beneficiary_mobile_sessions"("account_id", "expires_at");
++ALTER TABLE "beneficiary_mobile_sessions" ADD CONSTRAINT "beneficiary_mobile_sessions_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "beneficiary_mobile_accounts"("account_id") ON DELETE CASCADE ON UPDATE CASCADE;
+diff --git a/prisma/migrations/20261030000200_allow_beneficiary_audit_actor/migration.sql b/prisma/migrations/20261030000200_allow_beneficiary_audit_actor/migration.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..542be44e2b1675f7d9cc224aeffdf484388a23d6
+--- /dev/null
++++ b/prisma/migrations/20261030000200_allow_beneficiary_audit_actor/migration.sql
+@@ -0,0 +1,6 @@
++ALTER TABLE "audit_logs" DROP CONSTRAINT "audit_logs_actor_check";
++ALTER TABLE "audit_logs" ADD CONSTRAINT "audit_logs_actor_check" CHECK (
++  ("actor_type" = 'STAFF' AND "user_id" IS NOT NULL)
++  OR ("actor_type" IN ('SYSTEM', 'DELETED_STAFF') AND "user_id" IS NULL)
++  OR ("actor_type" = 'BENEFICIARY' AND "user_id" IS NULL AND "record_id" IS NOT NULL)
++);
+diff --git a/prisma/migrations/20261103000100_allow_beneficiary_document_uploads/migration.sql b/prisma/migrations/20261103000100_allow_beneficiary_document_uploads/migration.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a47c1507157df1397e4bb97c50782a88d631395
+--- /dev/null
++++ b/prisma/migrations/20261103000100_allow_beneficiary_document_uploads/migration.sql
+@@ -0,0 +1,8 @@
++ALTER TABLE "beneficiary_documents" ALTER COLUMN "uploaded_by" DROP NOT NULL;
++ALTER TABLE "beneficiary_documents" ADD COLUMN "uploaded_by_beneficiary" UUID;
++ALTER TABLE "beneficiary_documents" ADD CONSTRAINT "beneficiary_documents_uploaded_by_beneficiary_fkey"
++  FOREIGN KEY ("uploaded_by_beneficiary") REFERENCES "beneficiaries"("beneficiary_id") ON DELETE RESTRICT ON UPDATE CASCADE;
++ALTER TABLE "beneficiary_documents" ADD CONSTRAINT "beneficiary_documents_uploader_check" CHECK (
++  ("uploaded_by" IS NOT NULL AND "uploaded_by_beneficiary" IS NULL)
++  OR ("uploaded_by" IS NULL AND "uploaded_by_beneficiary" IS NOT NULL AND "uploaded_by_beneficiary" = "beneficiary_id")
++);
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 4017c223a2ebf4125787b14578fdbd568eb20cd4..607d27cda7e3253b07c1fa167b001be806f639dd 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -490,7 +490,8 @@ model Beneficiary {
+   barangay                Barangay                       @relation(fields: [barangayId], references: [barangayId])
+   enrollments             Enrollment[]
+   burialReferrals         BurialReferral[]
+-  documents               BeneficiaryDocument[]
++  documents               BeneficiaryDocument[] @relation("BeneficiaryDocuments")
++  selfUploadedDocuments   BeneficiaryDocument[] @relation("BeneficiaryDocumentUploader")
+   biometricData           BiometricData?
+   biometricConsents       BiometricConsent[]
+   biometricAttempts       BiometricVerificationAttempt[]
+@@ -504,10 +505,57 @@ model Beneficiary {
+   transactions            Transaction[]
+   notifications           Notification[]
+   chatbotSessions         ChatbotSession[]
++  mobileAccount           BeneficiaryMobileAccount?
+ 
+   @@map("beneficiaries")
+ }
+ 
++// Mobile phone ownership is separate from staff identity/eligibility verification.
++model BeneficiaryMobileAccount {
++  accountId     String    @id @default(uuid()) @map("account_id") @db.Uuid
++  beneficiaryId String    @unique @map("beneficiary_id") @db.Uuid
++  contactNumber String    @unique @map("contact_number") @db.VarChar(20)
++  verifiedAt    DateTime? @map("verified_at") @db.Timestamptz(6)
++  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
++  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
++
++  beneficiary Beneficiary            @relation(fields: [beneficiaryId], references: [beneficiaryId], onDelete: Cascade)
++  challenges  BeneficiaryMobileOtp[]
++  sessions    BeneficiaryMobileSession[]
++
++  @@map("beneficiary_mobile_accounts")
++}
++
++model BeneficiaryMobileOtp {
++  challengeId       String    @id @default(uuid()) @map("challenge_id") @db.Uuid
++  accountId         String    @map("account_id") @db.Uuid
++  purpose           String    @db.VarChar(10)
++  codeHash          String    @map("code_hash") @db.Char(64)
++  attemptsRemaining Int       @default(5) @map("attempts_remaining")
++  expiresAt         DateTime  @map("expires_at") @db.Timestamptz(6)
++  consumedAt        DateTime? @map("consumed_at") @db.Timestamptz(6)
++  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
++
++  account BeneficiaryMobileAccount @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
++
++  @@index([accountId, createdAt])
++  @@map("beneficiary_mobile_otps")
++}
++
++model BeneficiaryMobileSession {
++  sessionId String    @id @default(uuid()) @map("session_id") @db.Uuid
++  accountId String    @map("account_id") @db.Uuid
++  tokenHash String    @unique @map("token_hash") @db.Char(64)
++  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
++  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
++  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
++
++  account BeneficiaryMobileAccount @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
++
++  @@index([accountId, expiresAt])
++  @@map("beneficiary_mobile_sessions")
++}
++
+ model Enrollment {
+   enrollmentId        String           @id @default(uuid()) @map("enrollment_id") @db.Uuid
+   beneficiaryId       String           @map("beneficiary_id") @db.Uuid
+@@ -587,7 +635,8 @@ model BurialReferral {
+ model BeneficiaryDocument {
+   documentId         String               @id @default(uuid()) @map("document_id") @db.Uuid
+   beneficiaryId      String               @map("beneficiary_id") @db.Uuid
+-  uploadedById       String               @map("uploaded_by") @db.Uuid
++  uploadedById       String?              @map("uploaded_by") @db.Uuid
++  uploadedByBeneficiaryId String?          @map("uploaded_by_beneficiary") @db.Uuid
+   documentType       String               @map("doc_type") @db.VarChar(50)
+   documentName       String?              @map("document_name") @db.VarChar(150)
+   originalFileName   String               @map("original_file_name") @db.VarChar(255)
+@@ -602,8 +651,9 @@ model BeneficiaryDocument {
+   replacesDocumentId String?              @unique @map("replaces_document_id") @db.Uuid
+   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+ 
+-  beneficiary         Beneficiary          @relation(fields: [beneficiaryId], references: [beneficiaryId])
+-  uploadedBy          User                 @relation("DocumentUploader", fields: [uploadedById], references: [userId])
++  beneficiary         Beneficiary          @relation("BeneficiaryDocuments", fields: [beneficiaryId], references: [beneficiaryId])
++  uploadedBy          User?                @relation("DocumentUploader", fields: [uploadedById], references: [userId], onDelete: Restrict)
++  uploadedByBeneficiary Beneficiary?       @relation("BeneficiaryDocumentUploader", fields: [uploadedByBeneficiaryId], references: [beneficiaryId], onDelete: Restrict)
+   reviewedBy          User?                @relation("DocumentReviewer", fields: [reviewedById], references: [userId])
+   replacesDocument    BeneficiaryDocument? @relation("DocumentReplacement", fields: [replacesDocumentId], references: [documentId])
+   replacementDocument BeneficiaryDocument? @relation("DocumentReplacement")
+diff --git a/src/config/env.js b/src/config/env.js
+index 1acf3599dfff7c735f93280e50d217adf9518263..97b2d500323881c663abde605fb12a01023e042d 100644
+--- a/src/config/env.js
++++ b/src/config/env.js
+@@ -25,10 +25,14 @@ const environmentSchema = z.object({
+   CORS_ORIGIN: z.string().default("http://localhost:5173,http://127.0.0.1:5173"),
+   DATABASE_URL: z.string().min(1).optional(),
+   UPLOAD_ROOT: optionalTrimmedString.refine((value) => !value || path.isAbsolute(value), "UPLOAD_ROOT must be an absolute path."),
++  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(50).default(10),
+   JWT_ACCESS_SECRET: z.string().min(32).optional(),
+   JWT_ACCESS_EXPIRES_IN: duration.default("15m"),
+   JWT_ISSUER: z.string().trim().min(3).max(100).default("garantiyaid-api"),
+   JWT_AUDIENCE: z.string().trim().min(3).max(100).default("garantiyaid-staff"),
++  MOBILE_AUTH_MODE: z.enum(["DISABLED", "DEVELOPMENT"]).default("DISABLED"),
++  MOBILE_AUTH_SECRET: optionalTrimmedString.pipe(z.string().min(32).optional()),
++  DOCUMENT_STORAGE_DIR: optionalTrimmedString,
+   FIELD_ENCRYPTION_KEY: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
+   ENFORCE_HTTPS: z.enum(["true", "false"]).default("false"),
+@@ -85,6 +89,9 @@ const environmentSchema = z.object({
+   EMAIL_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(10_000),
+   DISTRIBUTION_REMINDER_LEAD_MINUTES: z.coerce.number().int().min(1).max(10_080).default(1_440),
+ }).superRefine((value, context) => {
++  if (value.MOBILE_AUTH_MODE === "DEVELOPMENT" && (!value.MOBILE_AUTH_SECRET || value.NODE_ENV === "production")) {
++    context.addIssue({ code: "custom", path: ["MOBILE_AUTH_MODE"], message: "Development mobile OTP requires MOBILE_AUTH_SECRET and must not run in production. Real SMS delivery is not connected." });
++  }
+   const origins = value.CORS_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean);
+ 
+   if (origins.length === 0 || origins.includes("*")) {
+@@ -220,10 +227,14 @@ export const env = {
+     .filter(Boolean),
+   databaseUrl: parsedEnvironment.data.DATABASE_URL,
+   uploadRoot: parsedEnvironment.data.UPLOAD_ROOT ?? path.resolve(process.cwd(), "uploads"),
++  databasePoolMax: parsedEnvironment.data.DATABASE_POOL_MAX,
+   jwtAccessSecret: parsedEnvironment.data.JWT_ACCESS_SECRET,
+   jwtAccessExpiresIn: parsedEnvironment.data.JWT_ACCESS_EXPIRES_IN,
+   jwtIssuer: parsedEnvironment.data.JWT_ISSUER,
+   jwtAudience: parsedEnvironment.data.JWT_AUDIENCE,
++  mobileAuthMode: parsedEnvironment.data.MOBILE_AUTH_MODE,
++  mobileAuthSecret: parsedEnvironment.data.MOBILE_AUTH_SECRET,
++  documentStorageDir: parsedEnvironment.data.DOCUMENT_STORAGE_DIR,
+   fieldEncryptionKey: parsedEnvironment.data.FIELD_ENCRYPTION_KEY,
+   trustProxyHops: parsedEnvironment.data.TRUST_PROXY_HOPS,
+   enforceHttps: parsedEnvironment.data.ENFORCE_HTTPS === "true",
+diff --git a/src/lib/prisma.js b/src/lib/prisma.js
+index 1719d67409c0eecd6e2601de1bc64ed25458de07..fce176cb925164418c5e739f02b4cac6f28e5082 100644
+--- a/src/lib/prisma.js
++++ b/src/lib/prisma.js
+@@ -9,7 +9,7 @@ if (!env.databaseUrl) {
+ }
+ 
+ const globalForPrisma = globalThis;
+-const adapter = new TransactionPrismaPg({ connectionString: env.databaseUrl });
++const adapter = new TransactionPrismaPg({ connectionString: env.databaseUrl, max: env.databasePoolMax });
+ 
+ const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter });
+ 
+diff --git a/src/middleware/rateLimit.js b/src/middleware/rateLimit.js
+index 13d1ebbd21f73d33f316ca7f1b52bf16a2852824..eabd7cb923621caa8466ad05c0592f2564cd2747 100644
+--- a/src/middleware/rateLimit.js
++++ b/src/middleware/rateLimit.js
+@@ -47,6 +47,12 @@ export const authenticationRateLimiter = rateLimit({
+   skipSuccessfulRequests: true,
+ });
+ 
++export const mobileAuthenticationRateLimiter = rateLimit({
++  ...commonOptions,
++  identifier: "garantiyaid-mobile-authentication",
++  limit: env.authRateLimitPer15Minutes,
++});
++
+ export const passwordResetRateLimiter = rateLimit({
+   ...commonOptions,
+   identifier: "garantiyaid-password-reset",
+diff --git a/src/modules/documents/beneficiaryDocument.controller.js b/src/modules/documents/beneficiaryDocument.controller.js
+index 17a5399fab90dab255959e560b1001891e2042a0..61bc571236e009b1398f26fd186458b486e0d6fb 100644
+--- a/src/modules/documents/beneficiaryDocument.controller.js
++++ b/src/modules/documents/beneficiaryDocument.controller.js
+@@ -6,7 +6,7 @@ import { asyncHandler } from "../../utils/asyncHandler.js";
+ import { AppError } from "../../utils/AppError.js";
+ import { clientIpAddress } from "../../utils/clientIp.js";
+ import { getBeneficiaryOrThrow } from "../beneficiaries/beneficiary.service.js";
+-import { detectAllowedDocumentMimeType } from "./beneficiaryDocument.file.js";
++import { decodeDocumentFileName, detectAllowedDocumentMimeType } from "./beneficiaryDocument.file.js";
+ import {
+   assertBeneficiaryDocumentBarangayAccess,
+   assertBeneficiaryDocumentReplacementAllowed,
+@@ -22,7 +22,7 @@ import {
+   resolveBeneficiaryDocumentPath,
+ } from "./beneficiaryDocument.service.js";
+ 
+-async function removeUploadedFile(file) {
++export async function removeUploadedFile(file) {
+   if (!file?.path) {
+     return;
+   }
+@@ -36,7 +36,7 @@ async function removeUploadedFile(file) {
+   }
+ }
+ 
+-async function prepareUploadedDocument(req) {
++export async function prepareUploadedDocument(req) {
+   if (!req.file) {
+     throw new AppError(400, "DOCUMENT_FILE_REQUIRED", "A beneficiary document file is required.");
+   }
+@@ -62,7 +62,7 @@ async function prepareUploadedDocument(req) {
+     );
+   }
+ 
+-  const originalFileName = path.basename(req.file.originalname).replace(/[\u0000-\u001f\u007f]/g, "");
++  const originalFileName = path.basename(decodeDocumentFileName(req.file.originalname)).replace(/[\u0000-\u001f\u007f]/g, "");
+   if (!originalFileName || originalFileName.length > 255) {
+     throw new AppError(400, "INVALID_FILE_NAME", "Document file name must contain 1 to 255 characters.");
+   }
+diff --git a/src/modules/documents/beneficiaryDocument.file.js b/src/modules/documents/beneficiaryDocument.file.js
+index 4e566a5982418acf72d4daca2da668e76bf76bab..c00dabfe2d8934c58f549b68d1fe9ee72101a1ff 100644
+--- a/src/modules/documents/beneficiaryDocument.file.js
++++ b/src/modules/documents/beneficiaryDocument.file.js
+@@ -2,6 +2,13 @@ const PNG_SIGNATURE = Buffer.from([
+   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+ ]);
+ 
++export function decodeDocumentFileName(name) {
++  // Multipart parameters arrive as Latin-1 in Busboy, while modern file pickers send UTF-8.
++  if (!/^[\u0000-\u00ff]*$/.test(name)) return name;
++  try { return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(name, "latin1")); }
++  catch { return name; }
++}
++
+ export function detectAllowedDocumentMimeType(buffer) {
+   if (buffer.subarray(0, 5).toString("ascii") === "%PDF-") {
+     return "application/pdf";
+diff --git a/src/modules/documents/beneficiaryDocument.upload.js b/src/modules/documents/beneficiaryDocument.upload.js
+index a19030a05e0d81423fd3e356a57e4fe50d8b3f90..f962cc903be164f9f497cbcd6f8fc7a59f642f2e 100644
+--- a/src/modules/documents/beneficiaryDocument.upload.js
++++ b/src/modules/documents/beneficiaryDocument.upload.js
+@@ -6,8 +6,7 @@ import { env } from "../../config/env.js";
+ import { BENEFICIARY_DOCUMENT_MAX_BYTES } from "./beneficiaryDocument.constants.js";
+ 
+ export const beneficiaryDocumentUploadDirectory = path.resolve(
+-  env.uploadRoot,
+-  "beneficiary-documents",
++  env.documentStorageDir ?? path.join(env.uploadRoot, "beneficiary-documents"),
+ );
+ 
+ mkdirSync(beneficiaryDocumentUploadDirectory, { recursive: true });
+@@ -26,5 +25,8 @@ export const uploadBeneficiaryDocument = multer({
+   limits: {
+     files: 1,
+     fileSize: BENEFICIARY_DOCUMENT_MAX_BYTES,
++    fields: 2,
++    parts: 3,
++    fieldSize: 256,
+   },
+ }).single("file");
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7c63fe01063ba74f6c60dbeda7f651f266f79bc
+--- /dev/null
++++ b/src/modules/mobile/mobile.routes.js
+@@ -0,0 +1,59 @@
++import { Router } from "express";
++import prisma from "../../lib/prisma.js";
++import { asyncHandler } from "../../utils/asyncHandler.js";
++import { validateBody, validateParams } from "../../middleware/validate.js";
++import { uploadBeneficiaryDocument } from "../documents/beneficiaryDocument.upload.js";
++import { beneficiaryDocumentParamsSchema } from "../documents/beneficiaryDocument.schemas.js";
++import { downloadMobileDocument, listMobileDocuments, uploadMobileDocument } from "./mobileDocuments.controller.js";
++import { getMobileOverview } from "./mobileOverview.service.js";
++import { issueMobileClaimPass } from "./mobileClaimPass.service.js";
++import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
++import { mobileOtpRequestSchema, mobileOtpVerificationSchema, mobileProfileSchema, mobileRegistrationSchema } from "./mobile.schemas.js";
++import { authenticateMobile, logoutMobile, mobileProfile, registerMobile, requestMobileOtp, updateMobileProfile, verifyMobileOtp } from "./mobile.service.js";
++
++const mobileRoutes = Router();
++
++mobileRoutes.get("/barangays", asyncHandler(async (_req, res) => {
++  const barangays = await prisma.barangay.findMany({
++    where: { isActive: true }, orderBy: [{ city: "asc" }, { barangayName: "asc" }],
++    select: { barangayId: true, barangayCode: true, barangayName: true, city: true, province: true },
++  });
++  res.json({ success: true, data: barangays.map(({ barangayId, ...area }) => ({ id: barangayId, ...area })) });
++}));
++
++mobileRoutes.post("/auth/register", mobileAuthenticationRateLimiter, validateBody(mobileRegistrationSchema), asyncHandler(async (req, res) => {
++  res.status(201).json({ success: true, data: await registerMobile(req.validatedBody) });
++}));
++mobileRoutes.post("/auth/otp/request", mobileAuthenticationRateLimiter, validateBody(mobileOtpRequestSchema), asyncHandler(async (req, res) => {
++  res.status(202).json({ success: true, data: await requestMobileOtp(req.validatedBody) });
++}));
++mobileRoutes.post("/auth/otp/verify", mobileAuthenticationRateLimiter, validateBody(mobileOtpVerificationSchema), asyncHandler(async (req, res) => {
++  res.json({ success: true, data: await verifyMobileOtp(req.validatedBody) });
++}));
++
++mobileRoutes.use(asyncHandler(async (req, _res, next) => {
++  req.mobileSession = await authenticateMobile(req.get("authorization"));
++  next();
++}));
++mobileRoutes.get("/beneficiaries/me", (req, res) => {
++  res.json({ success: true, data: mobileProfile(req.mobileSession.account) });
++});
++mobileRoutes.get("/beneficiaries/me/overview", asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileOverview(req.mobileSession) });
++}));
++mobileRoutes.post("/beneficiaries/me/claim-pass", mobileAuthenticationRateLimiter, asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await issueMobileClaimPass(req.mobileSession) });
++}));
++mobileRoutes.get("/beneficiaries/me/documents", listMobileDocuments);
++mobileRoutes.post("/beneficiaries/me/documents", uploadBeneficiaryDocument, uploadMobileDocument);
++mobileRoutes.post("/beneficiaries/me/documents/:documentId/replacement", validateParams(beneficiaryDocumentParamsSchema.pick({ documentId: true })), uploadBeneficiaryDocument, uploadMobileDocument);
++mobileRoutes.get("/beneficiaries/me/documents/:documentId/content", validateParams(beneficiaryDocumentParamsSchema.pick({ documentId: true })), downloadMobileDocument);
++mobileRoutes.patch("/beneficiaries/me", validateBody(mobileProfileSchema), asyncHandler(async (req, res) => {
++  res.json({ success: true, data: await updateMobileProfile(req.mobileSession, req.validatedBody) });
++}));
++mobileRoutes.post("/auth/logout", asyncHandler(async (req, res) => {
++  await logoutMobile(req.mobileSession);
++  res.sendStatus(204);
++}));
++
++export default mobileRoutes;
+diff --git a/src/modules/mobile/mobile.schemas.js b/src/modules/mobile/mobile.schemas.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e7f15540e0a69a00a2c125682adc94a2c993fee
+--- /dev/null
++++ b/src/modules/mobile/mobile.schemas.js
+@@ -0,0 +1,32 @@
++import { z } from "zod";
++import { optionalPhilippineMobileSchema } from "../../lib/philippine-mobile.js";
++import { createBeneficiarySchema } from "../beneficiaries/beneficiary.schemas.js";
++
++const name = z.string().trim().min(1).max(100)
++  .regex(/^[\p{L}\p{M} .'’-]+$/u, "Use letters and normal name punctuation only.")
++  .refine((value) => /\p{L}/u.test(value), "Enter a name containing letters.");
++const middleName = z.preprocess(
++  (value) => typeof value === "string" && !value.trim() ? null : value,
++  name.nullable().optional(),
++);
++const address = z.string().trim().min(5).max(500);
++const barangayId = z.uuid();
++const contactNumber = z.preprocess((value) => {
++  if (typeof value !== "string") return value;
++  const compact = value.trim().replace(/[\s()-]/g, "");
++  return /^9\d{9}$/.test(compact) ? `+63${compact}` : /^639\d{9}$/.test(compact) ? `+${compact}` : compact;
++}, optionalPhilippineMobileSchema().pipe(z.string()));
++const purpose = z.enum(["register", "login"]);
++
++export const mobileRegistrationSchema = createBeneficiarySchema.pick({ birthDate: true }).extend({
++  firstName: name, middleName, lastName: name, address, barangayId, contactNumber,
++  sex: z.preprocess(
++    (value) => typeof value === "string" ? value.trim().toLowerCase().replaceAll(" ", "_") : value,
++    z.enum(["female", "male", "prefer_not_to_say"]),
++  ).transform((value) => ({ female: "FEMALE", male: "MALE", prefer_not_to_say: "UNKNOWN" })[value]),
++}).strict();
++
++export const mobileOtpRequestSchema = z.object({ contactNumber, purpose }).strict();
++export const mobileOtpVerificationSchema = mobileOtpRequestSchema.extend({ code: z.string().regex(/^\d{6}$/) }).strict();
++export const mobileProfileSchema = z.object({ firstName: name, middleName, lastName: name, address, barangayId })
++  .partial().strict().refine((value) => Object.keys(value).length > 0, "Supply a name, address, or barangay change.");
+diff --git a/src/modules/mobile/mobile.service.js b/src/modules/mobile/mobile.service.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..cfdbeb82f40b7164bfa7bee5241b61d0835dc5b6
+--- /dev/null
++++ b/src/modules/mobile/mobile.service.js
+@@ -0,0 +1,192 @@
++import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
++import prisma from "../../lib/prisma.js";
++import { env } from "../../config/env.js";
++import { AppError } from "../../utils/AppError.js";
++
++const OTP_LIFETIME_MS = 5 * 60_000;
++const RESEND_WAIT_MS = 60_000;
++const SESSION_LIFETIME_MS = 7 * 24 * 60 * 60_000;
++
++function requireMobileAuth() {
++  if (env.mobileAuthMode !== "DEVELOPMENT" || !env.mobileAuthSecret || env.nodeEnv === "production") {
++    throw new AppError(503, "MOBILE_AUTH_UNAVAILABLE", "Beneficiary authentication is not enabled. Development OTP must be configured; real SMS delivery is not connected.");
++  }
++}
++
++export function hashMobileSecret(value) {
++  requireMobileAuth();
++  return createHmac("sha256", env.mobileAuthSecret).update(value).digest("hex");
++}
++
++export function mobileProfile(account) {
++  const person = account.beneficiary;
++  return {
++    id: person.beneficiaryId,
++    firstName: person.firstName, middleName: person.middleName, lastName: person.lastName,
++    birthDate: person.birthDate.toISOString().slice(0, 10),
++    sex: ({ FEMALE: "female", MALE: "male", UNKNOWN: "prefer_not_to_say", OTHER: "prefer_not_to_say" })[person.sex] ?? "prefer_not_to_say",
++    address: person.address, barangayId: person.barangayId,
++    contactNumber: account.contactNumber,
++    isVerified: person.isVerified, phoneVerified: Boolean(account.verifiedAt),
++    status: person.status.toLowerCase(),
++  };
++}
++
++function assertActive(account) {
++  if (account.beneficiary.status !== "ACTIVE") throw new AppError(403, "ACCOUNT_INACTIVE", "This beneficiary account is inactive. Contact your barangay facilitator.");
++}
++
++async function activeBarangay(database, barangayId) {
++  if (!await database.barangay.findFirst({ where: { barangayId, isActive: true }, select: { barangayId: true } })) {
++    throw new AppError(422, "INVALID_BARANGAY", "Select an active barangay.", { fields: [{ field: "barangayId", message: "Select an active barangay." }] });
++  }
++}
++
++async function audit(database, account, action) {
++  await database.auditLog.create({ data: {
++    actorType: "BENEFICIARY", action, entityAffected: "BENEFICIARY", recordId: account.beneficiaryId,
++    details: { source: "MOBILE_APP" },
++  } });
++}
++
++// Serialize OTP issue/verification for one account, including across API instances.
++async function lockedAccount(database, accountId) {
++  await database.$queryRaw`SELECT account_id FROM beneficiary_mobile_accounts WHERE account_id = ${accountId}::uuid FOR UPDATE`;
++  return database.beneficiaryMobileAccount.findUniqueOrThrow({ where: { accountId }, include: { beneficiary: true } });
++}
++
++async function createChallenge(database, accountId, purpose) {
++  const now = new Date();
++  const recent = await database.beneficiaryMobileOtp.findFirst({
++    where: { accountId, createdAt: { gt: new Date(now.getTime() - RESEND_WAIT_MS) } },
++  });
++  if (recent) throw new AppError(429, "OTP_TOO_SOON", "Wait one minute before requesting another code.");
++  await database.beneficiaryMobileOtp.updateMany({ where: { accountId, consumedAt: null }, data: { consumedAt: now } });
++  const challengeId = randomUUID();
++  const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
++  await database.beneficiaryMobileOtp.create({ data: {
++    challengeId, accountId, purpose, codeHash: hashMobileSecret(`otp:${challengeId}:${code}`),
++    expiresAt: new Date(now.getTime() + OTP_LIFETIME_MS),
++  } });
++  // Explicit development mode only; never log the code or send it to an SMS queue.
++  return { expiresInSeconds: OTP_LIFETIME_MS / 1000, developmentOtp: code };
++}
++
++export async function registerMobile(input) {
++  requireMobileAuth();
++  try {
++    return await prisma.$transaction(async (tx) => {
++      if (await tx.beneficiaryMobileAccount.findUnique({ where: { contactNumber: input.contactNumber } })) {
++        throw new AppError(409, "PHONE_ALREADY_REGISTERED", "This mobile number already has an account.");
++      }
++      await activeBarangay(tx, input.barangayId);
++      const nationalPhone = `0${input.contactNumber.slice(3)}`;
++      const existing = await tx.beneficiary.findFirst({ where: { OR: [
++        { contactNumber: { in: [input.contactNumber, nationalPhone, input.contactNumber.slice(1), input.contactNumber.slice(3)] } },
++        { firstName: { equals: input.firstName, mode: "insensitive" }, lastName: { equals: input.lastName, mode: "insensitive" }, birthDate: input.birthDate, barangayId: input.barangayId },
++      ] }, select: { beneficiaryId: true } });
++      // A shared contact number or matching identity is not proof of ownership of a staff record.
++      if (existing) throw new AppError(409, "ACCOUNT_LINK_REQUIRED", "A matching beneficiary record already exists. Sign in with its registered mobile number, or contact your barangay facilitator to link a staff-managed record.");
++      const beneficiary = await tx.beneficiary.create({ data: { ...input, middleName: input.middleName ?? null } });
++      const account = await tx.beneficiaryMobileAccount.create({ data: {
++        beneficiaryId: beneficiary.beneficiaryId, contactNumber: input.contactNumber,
++      }, include: { beneficiary: true } });
++      const otp = await createChallenge(tx, account.accountId, "register");
++      await audit(tx, account, "MOBILE_ACCOUNT_REGISTERED");
++      return { beneficiary: mobileProfile(account), verificationRequired: true, ...otp };
++    });
++  } catch (error) {
++    if (error.code === "P2002") throw new AppError(409, "PHONE_ALREADY_REGISTERED", "This mobile number already has an account.");
++    throw error;
++  }
++}
++
++async function findAccount(contactNumber) {
++  requireMobileAuth();
++  const account = await prisma.beneficiaryMobileAccount.findUnique({ where: { contactNumber }, select: { accountId: true } });
++  if (!account) throw new AppError(404, "ACCOUNT_NOT_FOUND", "No mobile account uses this number. Register or contact your barangay facilitator.");
++  return account;
++}
++
++function assertPurpose(account, purpose) {
++  assertActive(account);
++  if (purpose === "login" && !account.verifiedAt) throw new AppError(403, "ACCOUNT_NOT_VERIFIED", "Verify your phone before signing in.");
++  if (purpose === "register" && account.verifiedAt) throw new AppError(409, "ACCOUNT_ALREADY_VERIFIED", "This account is already verified. Sign in instead.");
++}
++
++export async function requestMobileOtp({ contactNumber, purpose }) {
++  const { accountId } = await findAccount(contactNumber);
++  return prisma.$transaction(async (tx) => {
++    const account = await lockedAccount(tx, accountId);
++    assertPurpose(account, purpose);
++    return createChallenge(tx, accountId, purpose);
++  });
++}
++
++export async function verifyMobileOtp({ contactNumber, purpose, code }) {
++  const { accountId } = await findAccount(contactNumber);
++  const result = await prisma.$transaction(async (tx) => {
++    const account = await lockedAccount(tx, accountId);
++    assertPurpose(account, purpose);
++    const challenge = await tx.beneficiaryMobileOtp.findFirst({ where: { accountId, purpose, consumedAt: null }, orderBy: { createdAt: "desc" } });
++    if (!challenge || challenge.expiresAt <= new Date()) throw new AppError(400, "OTP_EXPIRED", "This code has expired. Request a new one.");
++    if (challenge.attemptsRemaining <= 0) throw new AppError(429, "OTP_ATTEMPTS_EXCEEDED", "Request a new code and try again.");
++    const candidate = Buffer.from(hashMobileSecret(`otp:${challenge.challengeId}:${code}`), "hex");
++    const stored = Buffer.from(challenge.codeHash, "hex");
++    if (candidate.length !== stored.length || !timingSafeEqual(candidate, stored)) {
++      await tx.beneficiaryMobileOtp.update({ where: { challengeId: challenge.challengeId }, data: { attemptsRemaining: { decrement: 1 } } });
++      // Return then throw after commit so the failed attempt is not rolled back.
++      return { error: true };
++    }
++    const now = new Date();
++    await tx.beneficiaryMobileOtp.update({ where: { challengeId: challenge.challengeId }, data: { consumedAt: now } });
++    if (purpose === "register") account.verifiedAt = (await tx.beneficiaryMobileAccount.update({ where: { accountId }, data: { verifiedAt: now } })).verifiedAt;
++    const token = `gya_mobile_${randomBytes(32).toString("base64url")}`;
++    const expiresAt = new Date(now.getTime() + SESSION_LIFETIME_MS);
++    await tx.beneficiaryMobileSession.create({ data: { accountId, tokenHash: hashMobileSecret(`session:${token}`), expiresAt } });
++    await audit(tx, account, "MOBILE_PHONE_AUTHENTICATED");
++    return { accessToken: token, tokenType: "Bearer", expiresAt: expiresAt.toISOString(), beneficiary: mobileProfile(account) };
++  });
++  if (result.error) throw new AppError(400, "OTP_INCORRECT", "The verification code is incorrect.");
++  return result;
++}
++
++export async function authenticateMobile(authorization) {
++  const match = /^Bearer (gya_mobile_[A-Za-z0-9_-]{43})$/.exec(authorization ?? "");
++  if (!match) throw new AppError(401, "AUTHENTICATION_REQUIRED", "A beneficiary access token is required.");
++  const session = await prisma.beneficiaryMobileSession.findUnique({
++    where: { tokenHash: hashMobileSecret(`session:${match[1]}`) },
++    include: { account: { include: { beneficiary: true } } },
++  });
++  if (!session || session.revokedAt || session.expiresAt <= new Date() || !session.account.verifiedAt || session.account.beneficiary.status !== "ACTIVE") {
++    throw new AppError(401, "SESSION_EXPIRED", "Your beneficiary session has expired or the account is inactive. Sign in again.");
++  }
++  return session;
++}
++
++export async function updateMobileProfile(session, input) {
++  return prisma.$transaction(async (tx) => {
++    const account = await lockMobileSession(tx, session);
++    if (input.barangayId && input.barangayId !== account.beneficiary.barangayId) await activeBarangay(tx, input.barangayId);
++    account.beneficiary = await tx.beneficiary.update({ where: { beneficiaryId: account.beneficiaryId }, data: input });
++    await audit(tx, account, "MOBILE_PROFILE_UPDATED");
++    return mobileProfile(account);
++  });
++}
++
++export async function lockMobileSession(database, session) {
++  const account = await lockedAccount(database, session.accountId);
++  const current = await database.beneficiaryMobileSession.findUnique({ where: { sessionId: session.sessionId } });
++  if (!current || current.revokedAt || current.expiresAt <= new Date() || !account.verifiedAt || account.beneficiary.status !== "ACTIVE") {
++    throw new AppError(401, "SESSION_EXPIRED", "Sign in again before saving.");
++  }
++  return account;
++}
++
++export async function logoutMobile(session) {
++  await prisma.$transaction(async (tx) => {
++    const account = await lockedAccount(tx, session.accountId);
++    await tx.beneficiaryMobileSession.update({ where: { sessionId: session.sessionId }, data: { revokedAt: new Date() } });
++    await audit(tx, account, "MOBILE_SESSION_REVOKED");
++  });
++}
+diff --git a/src/modules/mobile/mobileClaimPass.service.js b/src/modules/mobile/mobileClaimPass.service.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f0e322d679a64cddb058117f7ff262dbb6d5f10
+--- /dev/null
++++ b/src/modules/mobile/mobileClaimPass.service.js
+@@ -0,0 +1,71 @@
++import { randomUUID } from "node:crypto";
++import prisma from "../../lib/prisma.js";
++import { AppError } from "../../utils/AppError.js";
++import { hashQrToken, assertQrVerificationConfigured, qrClaimPreviewOutcome } from "../distributions/distributionClaim.service.js";
++import { getMobileOverview } from "./mobileOverview.service.js";
++import { hashMobileSecret, lockMobileSession } from "./mobile.service.js";
++
++// A domain-separated HMAC lets the owner reopen a mobile-issued credential;
++// only its SHA-256 hash is stored, using the existing staff scanner's format.
++function mobileQrCredential(qrTokenId) {
++  return `gya1_${Buffer.from(hashMobileSecret(`qr-claim-pass:v1:${qrTokenId}`), "hex").toString("base64url")}`;
++}
++
++export async function issueMobileClaimPass(session) {
++  try {
++    return await prisma.$transaction(async (tx) => {
++      const account = await lockMobileSession(tx, session);
++      const { nextSchedule: schedule } = await getMobileOverview(session, tx);
++      if (!schedule) throw new AppError(404, "CLAIM_PASS_UNAVAILABLE", "No eligible published schedule is assigned to your account.");
++      const beneficiaryId = account.beneficiaryId;
++      const distributionId = schedule.distributionId;
++      const distribution = await tx.distribution.findUniqueOrThrow({
++        where: { distributionId }, select: { verificationRequirement: true },
++      });
++      assertQrVerificationConfigured(distribution);
++      const claim = await tx.claim.findUnique({
++        where: { beneficiaryId_distributionId: { beneficiaryId, distributionId } },
++        select: { claimId: true, claimStatus: true, biometricVerified: true, qrVerified: true },
++      });
++      let qrToken = await tx.qrToken.findUnique({
++        where: { beneficiaryId_distributionId: { beneficiaryId, distributionId } },
++      });
++      if (!qrToken) {
++        const qrTokenId = randomUUID();
++        qrToken = await tx.qrToken.create({ data: {
++          qrTokenId, beneficiaryId, distributionId,
++          tokenHash: hashQrToken(mobileQrCredential(qrTokenId)), expiresAt: new Date(schedule.slotEnd),
++        } });
++        await tx.auditLog.create({ data: {
++          actorType: "BENEFICIARY", action: "MOBILE_QR_PASS_ISSUED", entityAffected: "QR_TOKEN", recordId: qrTokenId,
++          details: { source: "MOBILE_APP", beneficiaryId, distributionId },
++        } });
++      }
++      const outcome = qrClaimPreviewOutcome({
++        distribution, qrToken, schedule: { status: schedule.status.toUpperCase() },
++        allocation: { allocationStatus: "ALLOCATED" }, existingClaim: claim,
++      });
++      if (!outcome.ok) {
++        const code = ({ QR_TOKEN_REVOKED: "CLAIM_PASS_REVOKED", QR_TOKEN_EXPIRED: "CLAIM_PASS_EXPIRED" })[outcome.code]
++          ?? "CLAIM_PASS_PROCESSED";
++        throw new AppError(outcome.statusCode, code, outcome.message);
++      }
++      const claimCode = mobileQrCredential(qrToken.qrTokenId);
++      if (hashQrToken(claimCode) !== qrToken.tokenHash) {
++        throw new AppError(409, "CLAIM_PASS_STAFF_ISSUED", "Staff issued this credential separately. Ask them for your pass; the mobile app cannot replace it.");
++      }
++      const { id, date, slotStart, slotEnd, queueNumber, location, program } = schedule;
++      return {
++        id: qrToken.qrTokenId, claimCode, status: "active",
++        issuedAt: qrToken.createdAt.toISOString(), expiresAt: qrToken.expiresAt.toISOString(),
++        schedule: { id, distributionId, date, slotStart, slotEnd, queueNumber, location,
++          program: { id: program.id, code: program.code, name: program.name } },
++      };
++    }, { isolationLevel: "Serializable" });
++  } catch (error) {
++    if (["P2034", "P2002"].includes(error.code)) {
++      throw new AppError(409, "QR_CLAIM_CONCURRENT_CHANGE", "QR or claim data changed concurrently. Refresh and try again.");
++    }
++    throw error;
++  }
++}
+diff --git a/src/modules/mobile/mobileDocuments.controller.js b/src/modules/mobile/mobileDocuments.controller.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..9108fa878b65cd0a7f95dd49bdaa73e35f0d0e69
+--- /dev/null
++++ b/src/modules/mobile/mobileDocuments.controller.js
+@@ -0,0 +1,99 @@
++import { access } from "node:fs/promises";
++import prisma from "../../lib/prisma.js";
++import { AppError } from "../../utils/AppError.js";
++import { asyncHandler } from "../../utils/asyncHandler.js";
++import { prepareUploadedDocument, removeUploadedFile } from "../documents/beneficiaryDocument.controller.js";
++import { assertBeneficiaryDocumentReplacementTransition, resolveBeneficiaryDocumentPath } from "../documents/beneficiaryDocument.service.js";
++import { lockMobileSession } from "./mobile.service.js";
++
++// Only beneficiary-facing metadata; never expose file paths, hashes, or staff identities.
++const mobileDocumentSelect = {
++  documentId: true, documentType: true, originalFileName: true, mimeType: true, fileSize: true,
++  reviewStatus: true, reviewedAt: true, reviewNotes: true, replacesDocumentId: true, createdAt: true,
++};
++
++function mobileDocument(document) {
++  return {
++    id: document.documentId, docType: document.documentType.toLowerCase(),
++    originalName: document.originalFileName, mimeType: document.mimeType, sizeBytes: document.fileSize,
++    status: ({ SUBMITTED: "received", ACCEPTED: "accepted", REJECTED: "rejected", SUPERSEDED: "superseded" })[document.reviewStatus],
++    reviewNotes: document.reviewNotes, reviewedAt: document.reviewedAt,
++    replacesDocumentId: document.replacesDocumentId, canReplace: document.reviewStatus === "REJECTED", createdAt: document.createdAt,
++  };
++}
++
++export const listMobileDocuments = asyncHandler(async (req, res) => {
++  const documents = await prisma.beneficiaryDocument.findMany({
++    where: { beneficiaryId: req.mobileSession.account.beneficiaryId, reviewStatus: { not: "REMOVED" } },
++    select: mobileDocumentSelect, orderBy: [{ createdAt: "desc" }, { documentId: "desc" }],
++  });
++  res.json({ success: true, data: documents.map(mobileDocument) });
++});
++
++export const uploadMobileDocument = asyncHandler(async (req, res) => {
++  let keepFile = false;
++  try {
++    const uploaded = await prepareUploadedDocument(req);
++    const replacementId = req.validatedParams?.documentId;
++    const result = await prisma.$transaction(async (tx) => {
++      // Recheck revocation after receiving the file and serialize mobile retries for this account.
++      const account = await lockMobileSession(tx, req.mobileSession);
++      const beneficiaryId = account.beneficiaryId;
++      if (replacementId) {
++        const original = await tx.beneficiaryDocument.findFirst({ where: { documentId: replacementId, beneficiaryId } });
++        if (!original) throw new AppError(404, "BENEFICIARY_DOCUMENT_NOT_FOUND", "Document not found.");
++        if (original.documentType === "OTHER") {
++          if (uploaded.documentName && original.documentName && uploaded.documentName.toLowerCase() !== original.documentName.toLowerCase()) {
++            throw new AppError(409, "DOCUMENT_NAME_MISMATCH", "Replace the same named document; upload a different requirement separately.");
++          }
++          uploaded.documentName ??= original.documentName ?? null;
++        }
++        const existing = await tx.beneficiaryDocument.findUnique({ where: { replacesDocumentId: replacementId } });
++        if (existing) {
++          if (existing.reviewStatus === "REMOVED" || existing.checksum !== uploaded.checksum || existing.documentType !== uploaded.documentType) {
++            throw new AppError(409, "DOCUMENT_STATUS_CHANGED", "This document already has a correction. Refresh your documents.");
++          }
++          return { document: existing, created: false };
++        }
++        assertBeneficiaryDocumentReplacementTransition(original, { beneficiaryId, documentType: uploaded.documentType });
++        const changed = await tx.beneficiaryDocument.updateMany({
++          where: { documentId: replacementId, beneficiaryId, reviewStatus: "REJECTED" }, data: { reviewStatus: "SUPERSEDED" },
++        });
++        if (changed.count !== 1) throw new AppError(409, "DOCUMENT_STATUS_CHANGED", "The review status changed. Refresh your documents.");
++      } else {
++        const existing = await tx.beneficiaryDocument.findFirst({
++          where: { beneficiaryId, documentType: uploaded.documentType, documentName: uploaded.documentName, checksum: uploaded.checksum, reviewStatus: { notIn: ["SUPERSEDED", "REMOVED"] } },
++          orderBy: { createdAt: "desc" },
++        });
++        if (existing) return { document: existing, created: false };
++      }
++      const document = await tx.beneficiaryDocument.create({ data: {
++        ...uploaded, beneficiaryId, uploadedByBeneficiaryId: beneficiaryId,
++        reviewStatus: "SUBMITTED", ...(replacementId ? { replacesDocumentId: replacementId } : {}),
++      }, select: mobileDocumentSelect });
++      await tx.auditLog.create({ data: {
++        actorType: "BENEFICIARY", action: replacementId ? "MOBILE_DOCUMENT_REPLACED" : "MOBILE_DOCUMENT_UPLOADED",
++        entityAffected: "BENEFICIARY_DOCUMENT", recordId: document.documentId,
++        details: { source: "MOBILE_APP", beneficiaryId, documentType: document.documentType, ...(replacementId ? { replacesDocumentId: replacementId } : {}) },
++      } });
++      return { document, created: true };
++    });
++    keepFile = result.created;
++    res.status(result.created ? 201 : 200).json({ success: true, data: mobileDocument(result.document) });
++  } finally {
++    if (!keepFile) await removeUploadedFile(req.file);
++  }
++});
++
++export const downloadMobileDocument = asyncHandler(async (req, res, next) => {
++  const document = await prisma.beneficiaryDocument.findFirst({
++    where: { documentId: req.validatedParams.documentId, beneficiaryId: req.mobileSession.account.beneficiaryId, reviewStatus: { not: "REMOVED" } },
++    select: { originalFileName: true, filePath: true },
++  });
++  if (!document) throw new AppError(404, "BENEFICIARY_DOCUMENT_NOT_FOUND", "Document not found.");
++  const file = resolveBeneficiaryDocumentPath(document.filePath);
++  try { await access(file); } catch { throw new AppError(404, "DOCUMENT_FILE_NOT_FOUND", "The stored file is unavailable."); }
++  res.set("X-Content-Type-Options", "nosniff");
++  res.set("Cache-Control", "private, no-store");
++  res.download(file, document.originalFileName, (error) => { if (error) next(error); });
++});
+diff --git a/src/modules/mobile/mobileOverview.service.js b/src/modules/mobile/mobileOverview.service.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..336f9f7735f6baf759e8cdda270358b6762501f9
+--- /dev/null
++++ b/src/modules/mobile/mobileOverview.service.js
+@@ -0,0 +1,65 @@
++import prisma from "../../lib/prisma.js";
++import { distributionSlotToResponse } from "../distributions/distributionSlot.service.js";
++
++const programSelect = {
++  programId: true, programCode: true, programName: true, programType: true,
++  description: true, grantAmount: true,
++};
++
++function mobileProgram(program) {
++  return {
++    id: program.programId, code: program.programCode, name: program.programName,
++    type: program.programType, description: program.description,
++    grantAmount: program.grantAmount === null ? null : Number(program.grantAmount),
++  };
++}
++
++export async function getMobileOverview(session, database = prisma) {
++  const beneficiaryId = session.account.beneficiaryId;
++  const [enrollments, schedule] = await Promise.all([
++    database.enrollment.findMany({
++      where: { beneficiaryId },
++      select: {
++        enrollmentId: true, enrollmentDate: true, status: true,
++        reviewNotes: true, reviewedAt: true, program: { select: programSelect },
++      },
++      orderBy: [{ enrollmentDate: "desc" }, { enrollmentId: "asc" }],
++    }),
++    database.schedule.findFirst({
++      where: {
++        beneficiaryId, status: { in: ["SCHEDULED", "CHECKED_IN"] },
++        slot: { slotEnd: { gt: new Date() }, slotStatus: { not: "CLOSED" } },
++        distribution: {
++          status: "OPEN", program: { status: "ACTIVE" },
++          allocations: { some: {
++            beneficiaryId, allocationStatus: "ALLOCATED", enrollment: { status: "APPROVED" },
++          } },
++        },
++      },
++      select: {
++        scheduleId: true, distributionId: true, queueNumber: true, status: true,
++        slot: { select: { slotStart: true, slotEnd: true, location: true } },
++        distribution: { select: { title: true, program: { select: programSelect } } },
++      },
++      orderBy: [{ slot: { slotStart: "asc" } }, { scheduleId: "asc" }],
++    }),
++  ]);
++  const slot = schedule ? distributionSlotToResponse(schedule.slot) : null;
++  return {
++    enrollments: enrollments.map(enrollment => ({
++      id: enrollment.enrollmentId,
++      enrollmentDate: enrollment.enrollmentDate.toISOString().slice(0, 10),
++      status: enrollment.status.toLowerCase(),
++      reviewNotes: enrollment.reviewNotes,
++      reviewedAt: enrollment.reviewedAt?.toISOString() ?? null,
++      program: mobileProgram(enrollment.program),
++    })),
++    nextSchedule: schedule ? {
++      id: schedule.scheduleId, distributionId: schedule.distributionId,
++      title: schedule.distribution.title, date: slot.slotStart.slice(0, 10),
++      slotStart: slot.slotStart, slotEnd: slot.slotEnd,
++      queueNumber: schedule.queueNumber, status: schedule.status.toLowerCase(),
++      location: schedule.slot.location, program: mobileProgram(schedule.distribution.program),
++    } : null,
++  };
++}
+diff --git a/src/routes/index.js b/src/routes/index.js
+index 0246650102dd4c7274a55d6a5b8e8d53185d98e8..6eb72092464cd2ba09119ab8d8ff02c90fda9412 100644
+--- a/src/routes/index.js
++++ b/src/routes/index.js
+@@ -1,5 +1,6 @@
+ import { Router } from "express";
+ import healthRoutes from "./health.routes.js";
++import mobileRoutes from "../modules/mobile/mobile.routes.js";
+ import authRoutes from "../modules/auth/auth.routes.js";
+ import barangayRoutes from "../modules/barangays/barangay.routes.js";
+ import beneficiaryRoutes from "../modules/beneficiaries/beneficiary.routes.js";
+@@ -24,6 +25,7 @@ import burialRoutes from "../modules/burial/burial.routes.js";
+ const apiRoutes = Router();
+ 
+ apiRoutes.use(healthRoutes);
++apiRoutes.use("/mobile", mobileRoutes);
+ apiRoutes.use("/auth", authRoutes);
+ apiRoutes.use("/barangays", barangayRoutes);
+ apiRoutes.use("/beneficiaries/:beneficiaryId/documents", beneficiaryDocumentRoutes);
+diff --git a/test/document-filename.test.js b/test/document-filename.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6d4d9774b56f6724bce499d5ea23fe77b6fc98f
+--- /dev/null
++++ b/test/document-filename.test.js
+@@ -0,0 +1,11 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { decodeDocumentFileName } from "../src/modules/documents/beneficiaryDocument.file.js";
++
++test("multipart document names preserve UTF-8, legacy names, and literal percent characters", () => {
++  for (const name of ["Málaga ñ sample.pdf", "文件.png", "Simple.pdf", "100%20sample.pdf"]) {
++    assert.equal(decodeDocumentFileName(Buffer.from(name, "utf8").toString("latin1")), name);
++  }
++  assert.equal(decodeDocumentFileName("Bañales.pdf"), "Bañales.pdf");
++  assert.equal(decodeDocumentFileName("文件.png"), "文件.png");
++});
+diff --git a/test/mobile-auth.integration.js b/test/mobile-auth.integration.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..70ec0eb297b9156ce607455c36b03eca0793ad07
+--- /dev/null
++++ b/test/mobile-auth.integration.js
+@@ -0,0 +1,128 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { randomInt, randomUUID } from "node:crypto";
++import { once } from "node:events";
++
++// Explicit opt-in: this suite creates/removes its own fixtures in a migrated test database.
++test("mobile registration is visible to staff, OTPs are single-use, and sessions remain isolated", {
++  skip: process.env.RUN_MOBILE_DB_TESTS !== "1",
++}, async () => {
++  const [{ default: app }, { default: prisma }, { signAccessToken }] = await Promise.all([
++    import("../src/app.js"), import("../src/lib/prisma.js"), import("../src/modules/auth/auth.service.js"),
++  ]);
++  const server = app.listen(0, "127.0.0.1");
++  await once(server, "listening");
++  const base = `http://127.0.0.1:${server.address().port}/api/v1`;
++  const marker = randomUUID();
++  const barangayId = randomUUID();
++  const inactiveId = randomUUID();
++  const userId = randomUUID();
++  const staffSessionId = randomUUID();
++  const ids = [];
++  const phone = () => `+639${randomInt(100_000_000, 1_000_000_000)}`;
++  const request = (path, { token, body, method = body ? "POST" : "GET", origin } = {}) => fetch(base + path, {
++    method, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { "Content-Type": "application/json" } : {}), ...(origin ? { Origin: origin } : {}) },
++    ...(body ? { body: JSON.stringify(body) } : {}),
++  });
++  const otp = (contactNumber, purpose, code) => request("/mobile/auth/otp/verify", { body: { contactNumber, purpose, code } });
++  const coolDown = (accountId) => prisma.beneficiaryMobileOtp.updateMany({ where: { accountId }, data: { createdAt: new Date(Date.now() - 61_000) } });
++  try {
++    for (const [id, active] of [[barangayId, true], [inactiveId, false]]) await prisma.barangay.create({ data: {
++      barangayId: id, barangayCode: id.slice(0, 20), barangayName: "Mobile integration test", city: "Test", province: "Test", isActive: active,
++    } });
++    await prisma.user.create({ data: { userId, employeeId: marker.slice(0, 20), username: `test_${marker.replaceAll("-", "").slice(0, 16)}`, fullName: "Mobile test staff", email: `${marker}@example.invalid`, passwordHash: "test-only-not-a-login-password", role: "SYSTEM_ADMIN" } });
++    await prisma.staffSession.create({ data: { sessionId: staffSessionId, userId, expiresAt: new Date(Date.now() + 300_000) } });
++    const staffToken = signAccessToken({ userId, role: "SYSTEM_ADMIN" }, { jwtId: staffSessionId });
++    const input = { firstName: "Mobile", middleName: "", lastName: "Integration", birthDate: "1990-01-01", sex: "female", address: "12 Synthetic Street", barangayId, contactNumber: phone() };
++    const areaResponse = await request("/mobile/barangays", { origin: "http://127.0.0.1:8765" });
++    assert.equal(areaResponse.headers.get("Access-Control-Allow-Origin"), "http://127.0.0.1:8765");
++    const areas = (await areaResponse.json()).data;
++    assert.ok(areas.some((area) => area.id === barangayId));
++    assert.ok(!areas.some((area) => area.id === inactiveId));
++    assert.equal((await request("/mobile/auth/register", { body: { ...input, isVerified: true } })).status, 400);
++    assert.equal((await request("/mobile/auth/register", { body: { ...input, barangayId: inactiveId } })).status, 422);
++    const registration = await request("/mobile/auth/register", { body: input });
++    assert.equal(registration.status, 201);
++    const registered = (await registration.json()).data;
++    ids.push(registered.beneficiary.id);
++    assert.match(registered.developmentOtp, /^\d{6}$/);
++    assert.equal(registered.beneficiary.isVerified, false);
++    assert.equal(registered.beneficiary.phoneVerified, false);
++    assert.equal(registered.beneficiary.contactNumber, input.contactNumber);
++    assert.equal((await request("/mobile/auth/register", { body: input })).status, 409);
++    assert.equal((await request("/mobile/auth/otp/request", { body: { contactNumber: input.contactNumber, purpose: "login" } })).status, 403);
++    assert.equal((await request("/mobile/auth/otp/request", { body: { contactNumber: input.contactNumber, purpose: "register" } })).status, 429);
++    const account = await prisma.beneficiaryMobileAccount.findUnique({ where: { beneficiaryId: ids[0] } });
++    const challenges = await prisma.beneficiaryMobileOtp.findMany({ where: { accountId: account.accountId } });
++    assert.notEqual(challenges[0].codeHash, registered.developmentOtp);
++    const incorrect = registered.developmentOtp === "000000" ? "999999" : "000000";
++    assert.equal((await otp(input.contactNumber, "register", incorrect)).status, 400);
++    assert.equal((await prisma.beneficiaryMobileOtp.findUnique({ where: { challengeId: challenges[0].challengeId } })).attemptsRemaining, 4);
++    const results = await Promise.all([otp(input.contactNumber, "register", registered.developmentOtp), otp(input.contactNumber, "register", registered.developmentOtp)]);
++    assert.deepEqual(results.map((response) => response.status).sort(), [200, 409]);
++    const login = (await results.find((response) => response.status === 200).json()).data;
++    assert.equal(login.beneficiary.phoneVerified, true);
++    assert.equal(login.beneficiary.isVerified, false); // Phone access must not approve identity or eligibility.
++    assert.equal(await prisma.enrollment.count({ where: { beneficiaryId: ids[0] } }), 0);
++    const session = await prisma.beneficiaryMobileSession.findFirst({ where: { accountId: account.accountId } });
++    assert.notEqual(session.tokenHash, login.accessToken);
++    assert.equal((await request("/mobile/beneficiaries/me")).status, 401);
++    assert.equal((await request("/mobile/beneficiaries/me", { token: staffToken })).status, 401);
++    assert.equal((await request("/beneficiaries", { token: login.accessToken })).status, 401);
++    const staffRecord = await request(`/beneficiaries/${ids[0]}`, { token: staffToken });
++    assert.equal(staffRecord.status, 200);
++    assert.equal((await staffRecord.json()).data.beneficiary.contactNumber, input.contactNumber);
++    const staffList = await request(`/beneficiaries?barangayId=${barangayId}`, { token: staffToken });
++    assert.ok((await staffList.json()).data.beneficiaries.some((person) => person.beneficiaryId === ids[0]));
++    const profile = (await (await request("/mobile/beneficiaries/me", { token: login.accessToken })).json()).data;
++    assert.equal(profile.id, ids[0]);
++    for (const key of ["passwordHash", "philsysNumber", "accountId", "tokenHash"]) assert.equal(key in profile, false);
++    for (const body of [{ status: "ACTIVE" }, { isVerified: true }, { beneficiaryId: randomUUID() }, { contactNumber: phone() }]) {
++      assert.equal((await request("/mobile/beneficiaries/me", { method: "PATCH", token: login.accessToken, body })).status, 400);
++    }
++    const update = await request("/mobile/beneficiaries/me", { method: "PATCH", token: login.accessToken, body: { address: "  24 Updated Street  ", middleName: " " } });
++    assert.equal(update.status, 200);
++    assert.equal((await update.json()).data.address, "24 Updated Street");
++    assert.equal((await (await request(`/beneficiaries/${ids[0]}`, { token: staffToken })).json()).data.beneficiary.address, "24 Updated Street");
++    await coolDown(account.accountId);
++    const loginChallenge = (await (await request("/mobile/auth/otp/request", { body: { contactNumber: input.contactNumber, purpose: "login" } })).json()).data;
++    const signedInAgain = (await (await otp(input.contactNumber, "login", loginChallenge.developmentOtp)).json()).data;
++    assert.equal(signedInAgain.beneficiary.address, "24 Updated Street");
++    assert.equal((await request("/mobile/auth/logout", { token: login.accessToken, body: {} })).status, 204);
++    assert.equal((await request("/mobile/beneficiaries/me", { token: login.accessToken })).status, 401);
++    assert.equal((await request("/mobile/beneficiaries/me", { token: signedInAgain.accessToken })).status, 200);
++
++    const secondInput = { ...input, lastName: "Other", contactNumber: phone() };
++    const second = (await (await request("/mobile/auth/register", { body: secondInput })).json()).data;
++    ids.push(second.beneficiary.id);
++    const otherToken = (await (await otp(secondInput.contactNumber, "register", second.developmentOtp)).json()).data.accessToken;
++    assert.equal((await (await request("/mobile/beneficiaries/me", { token: otherToken })).json()).data.id, ids[1]);
++    assert.equal((await request(`/mobile/beneficiaries/${ids[0]}`, { token: otherToken })).status, 404);
++    const blocked = await request("/mobile/auth/register", { body: { ...input, contactNumber: phone() } });
++    assert.equal(blocked.status, 409);
++    assert.equal((await blocked.json()).error.code, "ACCOUNT_LINK_REQUIRED");
++    await prisma.beneficiary.update({ where: { beneficiaryId: ids[0] }, data: { status: "SUSPENDED" } });
++    assert.equal((await request("/mobile/beneficiaries/me", { token: signedInAgain.accessToken })).status, 401);
++    assert.equal((await request("/mobile/auth/otp/request", { body: { contactNumber: input.contactNumber, purpose: "login" } })).status, 403);
++    const otherAccount = await prisma.beneficiaryMobileAccount.findUnique({ where: { beneficiaryId: ids[1] } });
++    await coolDown(otherAccount.accountId);
++    const expiring = (await (await request("/mobile/auth/otp/request", { body: { contactNumber: secondInput.contactNumber, purpose: "login" } })).json()).data;
++    await prisma.beneficiaryMobileOtp.updateMany({ where: { accountId: otherAccount.accountId, consumedAt: null }, data: { expiresAt: new Date(Date.now() - 1) } });
++    assert.equal((await otp(secondInput.contactNumber, "login", expiring.developmentOtp)).status, 400);
++    await coolDown(otherAccount.accountId);
++    const limited = (await (await request("/mobile/auth/otp/request", { body: { contactNumber: secondInput.contactNumber, purpose: "login" } })).json()).data;
++    const wrong = limited.developmentOtp === "000000" ? "999999" : "000000";
++    const failures = await Promise.all(Array.from({ length: 5 }, () => otp(secondInput.contactNumber, "login", wrong)));
++    assert.ok(failures.every((response) => response.status === 400));
++    assert.equal((await otp(secondInput.contactNumber, "login", limited.developmentOtp)).status, 429);
++    await prisma.beneficiaryMobileSession.updateMany({ where: { account: { beneficiaryId: ids[1] } }, data: { expiresAt: new Date(Date.now() - 1) } });
++    assert.equal((await request("/mobile/beneficiaries/me", { token: otherToken })).status, 401);
++  } finally {
++    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
++    await prisma.auditLog.deleteMany({ where: { recordId: { in: ids }, actorType: "BENEFICIARY" } });
++    await prisma.beneficiary.deleteMany({ where: { beneficiaryId: { in: ids } } });
++    await prisma.user.deleteMany({ where: { userId } });
++    await prisma.barangay.deleteMany({ where: { barangayId: { in: [barangayId, inactiveId] } } });
++    await prisma.$disconnect();
++  }
++});
+diff --git a/test/mobile-documents.integration.js b/test/mobile-documents.integration.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..4723b4620e82492e9ea9cbeebae1b345e247edae
+--- /dev/null
++++ b/test/mobile-documents.integration.js
+@@ -0,0 +1,150 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { randomUUID, randomInt } from "node:crypto";
++import { once } from "node:events";
++import { mkdtemp, readdir, rmdir, unlink } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { setTimeout as delay } from "node:timers/promises";
++
++test("private mobile documents share staff review, safe corrections, retries, and ownership", { skip: process.env.RUN_MOBILE_DB_TESTS !== "1" }, async () => {
++  const directory = await mkdtemp(join(tmpdir(), "garantiyaid-shared-documents-"));
++  process.env.DOCUMENT_STORAGE_DIR = directory;
++  const [{ default: app }, { default: prisma }, { signAccessToken }] = await Promise.all([
++    import("../src/app.js"), import("../src/lib/prisma.js"), import("../src/modules/auth/auth.service.js"),
++  ]);
++  const server = app.listen(0, "127.0.0.1");
++  await once(server, "listening");
++  const base = `http://127.0.0.1:${server.address().port}/api/v1`;
++  const collection = "/mobile/beneficiaries/me/documents";
++  const barangayId = randomUUID(), userId = randomUUID(), staffSessionId = randomUUID();
++  const beneficiaries = [];
++  const pdf = Buffer.from("%PDF-1.4\nSynthetic document, no personal data.\n%%EOF");
++  const call = (path, token, init = {}) => fetch(base + path, { ...init, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers } });
++  const upload = (token, { path = collection, bytes = pdf, type = "PROOF_OF_RESIDENCY", name = "Sample.pdf", documentName, extra } = {}) => {
++    const body = new FormData(); body.set("documentType", type); body.set("file", new Blob([bytes], { type: "application/pdf" }), name);
++    if (documentName) body.set("documentName", documentName);
++    if (extra) body.set("beneficiaryId", extra);
++    return call(path, token, { method: "POST", body });
++  };
++  const createAccount = async (lastName) => {
++    const contactNumber = `+639${randomInt(100_000_000, 1_000_000_000)}`;
++    const registered = await call("/mobile/auth/register", undefined, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
++      firstName: "Document", middleName: "", lastName, contactNumber, barangayId, birthDate: "1990-01-01", sex: "female", address: "12 Synthetic Street",
++    }) });
++    assert.equal(registered.status, 201);
++    const data = (await registered.json()).data; beneficiaries.push(data.beneficiary.id);
++    const verified = await call("/mobile/auth/otp/verify", undefined, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contactNumber, purpose: "register", code: data.developmentOtp }) });
++    return (await verified.json()).data.accessToken;
++  };
++  try {
++    await prisma.barangay.create({ data: { barangayId, barangayCode: barangayId.slice(0, 20), barangayName: "Document integration test", city: "Test", province: "Test" } });
++    await prisma.user.create({ data: { userId, employeeId: userId.slice(0, 20), fullName: "Synthetic Reviewer", email: `${userId}@example.invalid`, passwordHash: "not-a-login-password", role: "DSWD_STAFF", username: null } });
++    await prisma.staffSession.create({ data: { sessionId: staffSessionId, userId, expiresAt: new Date(Date.now() + 300_000) } });
++    const staffToken = signAccessToken({ userId, role: "DSWD_STAFF" }, { jwtId: staffSessionId });
++    const owner = await createAccount("Owner"), other = await createAccount("Other");
++    assert.equal((await upload()).status, 401);
++    assert.equal((await call(collection)).status, 401);
++    assert.deepEqual(await readdir(directory), []);
++    assert.equal((await upload(owner, { bytes: Buffer.alloc(0) })).status, 400);
++    assert.equal((await upload(owner, { bytes: Buffer.from("not a PDF") })).status, 400);
++    assert.equal((await upload(owner, { type: "APPROVED" })).status, 400);
++    assert.equal((await upload(owner, { bytes: Buffer.alloc(5 * 1024 * 1024 + 1) })).status, 400);
++    assert.equal((await upload(owner, { extra: beneficiaries[1] })).status, 400);
++    assert.deepEqual(await readdir(directory), []);
++    const responses = await Promise.all([upload(owner), upload(owner)]);
++    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 201]);
++    const saved = (await responses[0].json()).data;
++    assert.equal((await responses[1].json()).data.id, saved.id);
++    assert.equal(saved.status, "received");
++    for (const key of ["checksum", "filePath", "uploadedById", "beneficiaryId"]) assert.equal(key in saved, false);
++    assert.equal((await readdir(directory)).length, 1);
++    const stored = await prisma.beneficiaryDocument.findUnique({ where: { documentId: saved.id } });
++    assert.equal(stored.uploadedById, null);
++    assert.equal(stored.uploadedByBeneficiaryId, beneficiaries[0]);
++    await assert.rejects(prisma.beneficiaryDocument.update({ where: { documentId: saved.id }, data: { uploadedById: userId } }),
++      (error) => error.message.includes("beneficiary_documents_uploader_check"));
++    await assert.rejects(prisma.beneficiaryDocument.update({ where: { documentId: saved.id }, data: { uploadedByBeneficiaryId: beneficiaries[1] } }),
++      (error) => error.message.includes("beneficiary_documents_uploader_check"));
++    assert.equal((await call(`${collection}/${saved.id}/content`, other)).status, 404);
++    assert.equal((await call(`${collection}/${saved.id}/content`)).status, 401);
++    const downloaded = await call(`${collection}/${saved.id}/content`, owner);
++    assert.equal(downloaded.headers.get("Cache-Control"), "private, no-store");
++    assert.equal(downloaded.headers.get("X-Content-Type-Options"), "nosniff");
++    assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), pdf);
++    assert.deepEqual((await (await call(collection, other)).json()).data, []);
++    const list = await call(`/beneficiaries/${beneficiaries[0]}/documents`, staffToken);
++    assert.ok((await list.json()).data.documents.some((document) => document.documentId === saved.id));
++    const reviewPath = `/beneficiaries/${beneficiaries[0]}/documents/${saved.id}/review`;
++    const review = (path, body, token = staffToken) => call(path, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
++    assert.equal((await review(reviewPath, { decision: "ACCEPTED" }, owner)).status, 401);
++    assert.equal((await review(reviewPath, { decision: "REJECTED", reason: "Please upload a clearer copy." })).status, 200);
++    const rejected = (await (await call(collection, owner)).json()).data[0];
++    assert.equal(rejected.status, "rejected"); assert.equal(rejected.canReplace, true);
++    assert.equal(rejected.reviewNotes, "Please upload a clearer copy.");
++    assert.equal((await upload(other, { path: `${collection}/${saved.id}/replacement` })).status, 404);
++    assert.equal((await upload(owner, { path: `${collection}/${saved.id}/replacement`, type: "VALID_ID" })).status, 409);
++    assert.equal((await upload(owner, { path: `${collection}/invalid/replacement` })).status, 400);
++    const correctedBytes = Buffer.from("%PDF-1.4\nCorrected synthetic document\n%%EOF");
++    const correctedResponses = await Promise.all([upload(owner, { path: `${collection}/${saved.id}/replacement`, bytes: correctedBytes }), upload(owner, { path: `${collection}/${saved.id}/replacement`, bytes: correctedBytes })]);
++    assert.deepEqual(correctedResponses.map((response) => response.status).sort(), [200, 201]);
++    const corrected = (await correctedResponses[0].json()).data;
++    assert.equal(corrected.replacesDocumentId, saved.id); assert.equal(corrected.status, "received");
++    assert.equal((await correctedResponses[1].json()).data.id, corrected.id);
++    assert.equal((await readdir(directory)).length, 2);
++    assert.equal((await review(`/beneficiaries/${beneficiaries[0]}/documents/${corrected.id}/review`, { decision: "ACCEPTED" })).status, 200);
++    const documents = (await (await call(collection, owner)).json()).data;
++    assert.equal(documents.find((document) => document.id === saved.id).status, "superseded");
++    assert.equal(documents.find((document) => document.id === corrected.id).status, "accepted");
++    assert.equal((await upload(owner, { path: `${collection}/${corrected.id}/replacement` })).status, 409);
++    assert.equal(await prisma.enrollment.count({ where: { beneficiaryId: beneficiaries[0] } }), 0);
++    assert.equal((await prisma.beneficiary.findUnique({ where: { beneficiaryId: beneficiaries[0] } })).isVerified, false);
++    assert.equal((await call("/mobile/auth/logout", owner, { method: "POST" })).status, 204);
++    assert.equal((await upload(owner)).status, 401);
++    assert.equal((await call(`/uploads/beneficiary-documents/${saved.id}.upload`, other)).status, 404);
++    const boundary = `mobile-${randomUUID()}`;
++    let finishUpload;
++    const slowBody = new ReadableStream({ start(controller) {
++      controller.enqueue(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="documentType"\r\n\r\nOTHER\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="Slow.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\n`));
++      finishUpload = () => { controller.enqueue(Buffer.from(`Synthetic streamed file\n%%EOF\r\n--${boundary}--\r\n`)); controller.close(); };
++    } });
++    const inFlight = call(collection, other, { method: "POST", headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` }, body: slowBody, duplex: "half" });
++    try {
++      for (let attempt = 0; attempt < 100 && (await readdir(directory)).length === 2; attempt++) await delay(20);
++      assert.equal((await readdir(directory)).length, 3, "The upload must have passed authentication and started writing before logout.");
++      assert.equal((await call("/mobile/auth/logout", other, { method: "POST" })).status, 204);
++    } finally { finishUpload(); }
++    assert.equal((await inFlight).status, 401);
++    assert.equal((await readdir(directory)).length, 2, "The file received after revocation must be removed.");
++    const v4Owner = await createAccount("VersionFour");
++    const named = await upload(v4Owner, { type: "OTHER", documentName: "Request letter" });
++    assert.equal(named.status, 201);
++    const namedId = (await named.json()).data.id;
++    const namedReview = `/beneficiaries/${beneficiaries[2]}/documents/${namedId}/review`;
++    assert.equal((await review(namedReview, { decision: "REJECTED", reason: "Please correct the request letter." })).status, 200);
++    const correctionPath = `${collection}/${namedId}/replacement`;
++    assert.equal((await upload(v4Owner, { path: correctionPath, type: "OTHER", documentName: "Different requirement", bytes: correctedBytes })).status, 409);
++    const namedCorrection = await upload(v4Owner, { path: correctionPath, type: "OTHER", bytes: correctedBytes });
++    assert.equal(namedCorrection.status, 201);
++    const namedCorrectionId = (await namedCorrection.json()).data.id;
++    assert.equal((await prisma.beneficiaryDocument.findUnique({ where: { documentId: namedCorrectionId } })).documentName, "Request letter");
++    assert.equal((await upload(v4Owner, { type: "OTHER", documentName: "Different requirement", bytes: correctedBytes })).status, 201, "Separate named requirements must not deduplicate each other.");
++    await prisma.beneficiaryDocument.update({ where: { documentId: namedCorrectionId }, data: { reviewStatus: "REMOVED" } });
++    const visible = (await (await call(collection, v4Owner)).json()).data;
++    assert.equal(visible.some(document => document.id === namedCorrectionId), false);
++    assert.equal((await call(`${collection}/${namedCorrectionId}/content`, v4Owner)).status, 404);
++    assert.equal((await upload(v4Owner, { path: correctionPath, type: "OTHER", bytes: correctedBytes })).status, 409, "A removed correction must not reappear through an idempotent retry.");
++    assert.equal((await upload(v4Owner, { type: "OTHER", documentName: "Request letter", bytes: correctedBytes })).status, 201, "Removed evidence must not be returned by upload retries.");
++  } finally {
++    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
++    const documents = await prisma.beneficiaryDocument.findMany({ where: { beneficiaryId: { in: beneficiaries } }, select: { documentId: true } });
++    await prisma.auditLog.deleteMany({ where: { recordId: { in: [...beneficiaries, ...documents.map((document) => document.documentId)] } } });
++    await prisma.beneficiaryDocument.deleteMany({ where: { beneficiaryId: { in: beneficiaries } } });
++    await prisma.beneficiary.deleteMany({ where: { beneficiaryId: { in: beneficiaries } } });
++    await prisma.user.deleteMany({ where: { userId } });
++    await prisma.barangay.deleteMany({ where: { barangayId } });
++    await prisma.$disconnect();
++    for (const file of await readdir(directory)) await unlink(join(directory, file));
++    await rmdir(directory);
++  }
++});
+diff --git a/test/mobile.configuration.test.js b/test/mobile.configuration.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..133306d8b7bcda897899547ce28b3527a2fed66c
+--- /dev/null
++++ b/test/mobile.configuration.test.js
+@@ -0,0 +1,25 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { once } from "node:events";
++import app from "../src/app.js";
++import { env } from "../src/config/env.js";
++
++test("disabled mobile authentication fails closed without exposing a development code", async () => {
++  const previousMode = env.mobileAuthMode;
++  env.mobileAuthMode = "DISABLED";
++  const server = app.listen(0, "127.0.0.1");
++  await once(server, "listening");
++  try {
++    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/mobile/auth/otp/request`, {
++      method: "POST", headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ contactNumber: "09171234567", purpose: "login" }),
++    });
++    const body = await response.json();
++    assert.equal(response.status, 503);
++    assert.equal(body.error.code, "MOBILE_AUTH_UNAVAILABLE");
++    assert.equal("developmentOtp" in (body.data ?? {}), false);
++  } finally {
++    env.mobileAuthMode = previousMode;
++    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
++  }
++});
+diff --git a/test/mobile.schemas.test.js b/test/mobile.schemas.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..facceed18204f0417342dddf8f0cea746ebc722c
+--- /dev/null
++++ b/test/mobile.schemas.test.js
+@@ -0,0 +1,25 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { mobileOtpRequestSchema, mobileProfileSchema, mobileRegistrationSchema } from "../src/modules/mobile/mobile.schemas.js";
++
++test("mobile input normalizes phone/name values and rejects protected fields and invalid dates", () => {
++  const input = {
++    firstName: "  María-José ", middleName: " ", lastName: "D’Cruz", birthDate: "1990-04-23",
++    sex: "Prefer not to say", address: "12 Test Street", barangayId: "62f95c7d-68e7-4c3a-9ced-7fef670b8a3a", contactNumber: "9171234567",
++  };
++  const result = mobileRegistrationSchema.parse(input);
++  assert.equal(result.firstName, "María-José");
++  assert.equal(result.middleName, null);
++  assert.equal(result.sex, "UNKNOWN");
++  assert.equal(result.contactNumber, "+639171234567");
++  for (const contactNumber of ["0917 123 4567", "+63 917 123 4567", "639171234567"]) {
++    assert.equal(mobileOtpRequestSchema.parse({ contactNumber, purpose: "login" }).contactNumber, result.contactNumber);
++  }
++  for (const change of [{ firstName: "123" }, { birthDate: "2026-02-31" }, { birthDate: "2999-01-01" }, { status: "ACTIVE" }, { isVerified: true }, { contactNumber: null }]) {
++    assert.equal(mobileRegistrationSchema.safeParse({ ...input, ...change }).success, false);
++  }
++  assert.deepEqual(mobileProfileSchema.parse({ middleName: " " }), { middleName: null });
++  for (const value of [{}, { beneficiaryId: input.barangayId }, { contactNumber: input.contactNumber }, { isVerified: true }, { status: "ACTIVE" }]) {
++    assert.equal(mobileProfileSchema.safeParse(value).success, false);
++  }
++});
