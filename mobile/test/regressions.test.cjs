@@ -18,6 +18,7 @@ function loadSource(file, mocks, globals = {}) {
     require: (name) => {
       if (name === './biometrics') return { BiometricSummary: 'BiometricSummary', BiometricPrivacy: 'BiometricPrivacy', BiometricConsentScreen: 'BiometricConsentScreen', BiometricEnrollmentScreen: 'BiometricEnrollmentScreen' };
       if (name === './support') return { SupportContent: 'SupportContent' };
+      if (name === './document-checklist') return { DocumentChecklist: 'DocumentChecklist' };
       assert.ok(name in mocks, `Unexpected import: ${name}`);
       return mocks[name];
     },
@@ -122,6 +123,75 @@ test('a stale screen reset callback cannot clear a replacement account', async (
   const oldReset = render().reset;
   await render().startSession('new', beneficiary('new'));
   await oldReset(); assert.equal(render().accessToken, 'new');
+});
+
+test('named document selection preserves failed input and locks the original requirement during correction in EN and BS', async () => {
+  for (const language of ['en', 'bs']) {
+    let cursor = 0, effect, response = deferred(), sent, writes = 0; const slots = [];
+    const state = { beneficiary: beneficiary('owner'), documents: [], documentsLoading: false, documentsError: false,
+      t: (en, bs) => language === 'en' ? en : bs, refreshDocuments: async () => {},
+      submitDocument: async (file, docType, replacement, documentName) => { writes++; sent = { file, docType, replacement, documentName }; return response.promise; } };
+    const components = new Proxy({}, { get: (_, key) => String(key) });
+    const useState = initial => { const id = cursor++; if (!(id in slots)) slots[id] = initial; return [slots[id], value => { slots[id] = typeof value === 'function' ? value(slots[id]) : value; }]; };
+    const source = loadSource('screens/details.tsx', { react: { createElement: (type, props, ...children) => ({ type, props, children }), useState,
+      useRef: initial => useState({ current: initial })[0], useEffect: callback => { effect = callback; } }, 'react-native': {},
+      'expo-router': { useLocalSearchParams: () => ({ page: 'enrollment-documents' }) },
+      'expo-document-picker': { getDocumentAsync: async () => ({ canceled: false, assets: [{ name: 'Named.pdf', size: 30, uri: 'test.pdf' }] }) },
+      'react-native-qrcode-svg': 'QRCode', 'lucide-react-native': components, '../components': components, '../state': { useDemo: () => state },
+      '../theme': { colors: {}, fonts: {} }, './main': { s: {} }, '../api': { ApiRequestError, IS_SHARED_BACKEND: true, MAX_DOCUMENT_BYTES: 5242880 },
+      '../format': loadSource('format.ts', {}) });
+    const form = source.DetailScreen().children[0].children[0].type();
+    const render = () => { cursor = 0; return form.type(); };
+    const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+    const button = (en, bs) => nodes(render()).find(node => node.type === 'Button' && node.children[0] === state.t(en, bs));
+    const field = () => nodes(render()).find(node => node.type === 'Field');
+    render(); const cleanup = effect();
+    const choose = requirement => nodes(render()).find(node => node.type === 'DocumentChecklist').props.onChoose(requirement);
+    choose({ docType: 'other', documentName: null });
+    await button('Choose document', 'Pagpili og dokumento').props.onPress();
+    await new Promise(setImmediate);
+    button('Upload document', 'I-upload ang dokumento').props.onPress(); assert.equal(writes, 0);
+    choose({ docType: 'other', documentName: 'School Enrollment Proof' }); assert.equal(field().props.value, 'School Enrollment Proof');
+    const sendButton = button('Upload document', 'I-upload ang dokumento');
+    sendButton.props.onPress(); sendButton.props.onPress();
+    assert.equal(writes, 1); assert.equal(sent.documentName, 'School Enrollment Proof'); assert.equal(field().props.editable, false);
+    response.reject(new ApiRequestError(503)); await new Promise(setImmediate);
+    assert.equal(field().props.value, 'School Enrollment Proof'); assert.ok(JSON.stringify(render()).includes('Named.pdf'));
+    response = deferred(); button('Upload document', 'I-upload ang dokumento').props.onPress();
+    response.resolve({ ...document('named'), docType: 'other', documentName: 'School Enrollment Proof' }); await new Promise(setImmediate);
+    state.documents = [{ ...document('rejected'), docType: 'other', documentName: 'Certificate of Indigency', status: 'rejected', canReplace: true }];
+    button('Upload corrected document', 'I-upload ang gitul-id nga dokumento').props.onPress();
+    assert.equal(field().props.value, 'Certificate of Indigency'); assert.equal(field().props.editable, false);
+    await button('Choose document', 'Pagpili og dokumento').props.onPress(); await new Promise(setImmediate); response = deferred();
+    button('Upload document', 'I-upload ang dokumento').props.onPress();
+    assert.equal(sent.replacement, 'rejected'); assert.equal(sent.documentName, 'Certificate of Indigency');
+    response.resolve({ ...document('corrected'), docType: 'other', documentName: sent.documentName }); await new Promise(setImmediate); cleanup();
+  }
+});
+
+test('document checklists handle pagination, stale responses, selection and current-session 401 safely', async () => {
+  let cursor = 0, cleanup, resets = 0, chosen, calls = 0; const slots = [], old = deferred(), recent = deferred();
+  const data = { programs: [{ id: 'program', name: 'Program', code: 'P', status: 'active', requirements: [{ docType: 'other', documentName: 'School Enrollment Proof' }] }], pagination: { page: 1, totalPages: 2 } };
+  const state = { accessToken: 'owner', t: en => en, reset: async () => { resets++; } };
+  const useState = initial => { const id = cursor++; if (!(id in slots)) slots[id] = initial; return [slots[id], value => { slots[id] = value; }]; };
+  const components = new Proxy({}, { get: (_, key) => String(key) });
+  const source = loadSource('screens/document-checklist.tsx', { react: { createElement: (type, props, ...children) => ({ type, props, children }), useState,
+    useRef: initial => useState({ current: initial })[0], useEffect: callback => { if (!cleanup) cleanup = callback(); } }, '../components': components,
+    '../state': { useDemo: () => state }, '../format': loadSource('format.ts', {}), '../api': { ApiRequestError, IS_SHARED_BACKEND: true,
+      getDocumentRequirements: async () => ++calls === 1 ? data : calls === 2 ? old.promise : calls === 3 ? recent.promise : Promise.reject(new ApiRequestError(401)) } });
+  const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  let wrapper = source.DocumentChecklist({ disabled: false, onChoose: () => {} });
+  nodes(wrapper).find(node => node.type === 'Button').props.onPress(); cursor = 0;
+  wrapper = source.DocumentChecklist({ disabled: false, onChoose: () => {} });
+  const options = nodes(wrapper).find(node => typeof node.type === 'function').type;
+  slots.length = 0;
+  const render = () => { cursor = 0; return options({ disabled: false, onChoose: value => { chosen = value; } }); };
+  const button = label => nodes(render()).find(node => node.type === 'Button' && node.children.join('') === label);
+  render(); await new Promise(setImmediate);
+  button('Refresh checklists').props.onPress(); button('Refresh checklists').props.onPress();
+  recent.resolve(data); await new Promise(setImmediate); old.reject(new ApiRequestError(401)); await new Promise(setImmediate); assert.equal(resets, 0);
+  button('Program\nP').props.onPress(); button('School Enrollment Proof').props.onPress(); assert.equal(chosen.documentName, 'School Enrollment Proof');
+  button('Refresh checklists').props.onPress(); await new Promise(setImmediate); assert.equal(resets, 1); cleanup();
 });
 
 test('Help distinguishes unavailable, loading and confirmed empty schedules and claims in EN and BS', () => {
@@ -871,6 +941,7 @@ for (const platform of ['web', 'android']) {
     }
     const bytes = new TextEncoder().encode('%PDF-1.4\nSynthetic\n%%EOF').buffer;
     const asset = { name: 'Sample.pdf', uri: 'file:///cache/sample.pdf', file: new Blob([bytes]) };
+    let expectedType = 'BIRTH_CERTIFICATE', expectedName;
     const source = loadSource('api.ts', {
       'react-native': { Platform: { OS: platform } },
       'expo-file-system': { File: class { get size() { return bytes.byteLength; } async arrayBuffer() { return bytes; } } },
@@ -881,7 +952,8 @@ for (const platform of ['web', 'android']) {
         assert.equal(url, 'http://127.0.0.1:4000/api/v1/mobile/beneficiaries/me/documents/old-id/replacement');
         assert.equal(init.headers['Content-Type'], undefined);
         assert.equal(init.headers.Authorization, 'Bearer shared-owner');
-        assert.equal(init.body.values.get('documentType').value, 'BIRTH_CERTIFICATE');
+        assert.equal(init.body.values.get('documentType').value, expectedType);
+        assert.equal(init.body.values.get('documentName')?.value, expectedName);
         const file = init.body.values.get('file');
         if (platform === 'web') { assert.equal(file.value.size, bytes.byteLength); assert.equal(file.name, asset.name); }
         else { assert.equal(file.value.uri, asset.uri); assert.equal(file.value.type, 'application/pdf'); assert.equal(file.value.name, asset.name); }
@@ -889,6 +961,9 @@ for (const platform of ['web', 'android']) {
       },
     });
     assert.equal((await source.uploadDocument('shared-owner', asset, 'birth_certificate', 'old-id')).id, 'correction');
+    expectedType = 'OTHER'; expectedName = 'Certificate of Indigency';
+    await source.uploadDocument('shared-owner', asset, 'other', 'old-id', '  Certificate of Indigency  ');
+    await assert.rejects(source.uploadDocument('shared-owner', asset, 'other', undefined, 'x'.repeat(151)), error => error.code === 'DOCUMENT_NAME_TOO_LONG');
   });
 }
 
@@ -1331,7 +1406,7 @@ test('document selection, uploading, failure retry, and received status follow s
     'react-native-qrcode-svg': 'QRCode', 'lucide-react-native': components, '../components': components,
     '../state': { useDemo: () => state }, '../theme': { colors: {}, fonts: {} },
     '../api': { ApiRequestError, MAX_DOCUMENT_BYTES: 5 * 1024 * 1024 },
-    '../format': { formatDateTime: (value) => value, formatStatus: (value) => value }, './main': { s: {} },
+    '../format': { formatDateTime: (value) => value, formatStatus: (value) => value, formatDocumentType: (value) => value }, './main': { s: {} },
   });
   const form = source.DetailScreen().children[0].children[0].type();
   const render = () => { cursor = 0; return form.type(); };

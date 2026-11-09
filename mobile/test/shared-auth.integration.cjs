@@ -469,7 +469,62 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     assert.equal(documents.find((item) => item.id === corrected.id).status, 'accepted');
     assert.ok(documents.find((item) => item.id === corrected.id).reviewedAt);
     assert.equal(documents.find((item) => item.id === document.id).status, 'superseded');
+    // Named requirements must reach the same checklist used by staff enrollment review.
+    const createChecklist = async (status, enrolledOwner) => {
+      const id = randomUUID(); programIds.push(id);
+      await prisma.program.create({ data: { programId: id, programCode: id.slice(0, 25), programName: 'Synthetic named documents ' + id.slice(0, 8),
+        programType: 'RELIEF', status, createdById: userId, requiredDocumentTypes: ['BIRTH_CERTIFICATE', 'OTHER'],
+        otherRequiredDocumentNames: ['Certificate of Indigency', 'School Enrollment Proof'], otherRequiredDocumentName: 'Certificate of Indigency',
+        criteria: { create: { criterionName: 'Adult', fieldName: 'AGE', operator: 'GREATER_THAN_OR_EQUAL', expectedValue: 18, isRequired: true } },
+        ...(enrolledOwner ? { enrollments: { create: { beneficiaryId: enrolledOwner, submittedById: userId } } } : {}) } });
+      return id;
+    };
+    const namedProgram = await createChecklist('ACTIVE');
+    const ownClosed = await createChecklist('CLOSED', beneficiaryId);
+    const foreignClosed = await createChecklist('CLOSED', other.beneficiary.id);
+    const hiddenDraft = await createChecklist('DRAFT', beneficiaryId);
+    const hiddenCancelled = await createChecklist('CANCELLED', beneficiaryId);
+    const catalog = await api.getDocumentRequirements(login.accessToken);
+    assert.ok(catalog.programs.some(item => item.id === ownClosed));
+    for (const id of [foreignClosed, hiddenDraft, hiddenCancelled]) assert.ok(!catalog.programs.some(item => item.id === id));
+    const checklist = catalog.programs.find(item => item.id === namedProgram);
+    assert.deepEqual(Object.keys(checklist).sort(), ['code', 'id', 'name', 'requirements', 'status']);
+    assert.equal(checklist.requirements.filter(item => item.docType === 'other').length, 2);
+    assert.equal(checklist.requirements[1].documentName, 'Certificate of Indigency');
+    assert.ok(!JSON.stringify(catalog).match(/budgetAmount|createdBy|eligibilitySnapshot|criteria|beneficiaryId/));
+    const paging = await fetch(`${base}/mobile/beneficiaries/me/document-requirements?page=1&pageSize=1`, { headers: { Authorization: `Bearer ${login.accessToken}` } });
+    assert.equal(paging.headers.get('cache-control'), 'private, no-store');
+    assert.ok((await paging.json()).data.pagination.totalPages > 1);
+    assert.equal((await fetch(`${base}/mobile/beneficiaries/me/document-requirements?beneficiaryId=${other.beneficiary.id}`, { headers: { Authorization: `Bearer ${login.accessToken}` } })).status, 400);
+    for (const token of ['', staffToken]) await assert.rejects(api.getDocumentRequirements(token), error => error.status === 401);
+    const submitNamed = () => fetch(`${base}/programs/${namedProgram}/enrollments`, { method: 'POST', headers: { Authorization: `Bearer ${staffToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ beneficiaryId }) });
+    assert.equal((await submitNamed()).status, 409);
+    const namedOne = await api.uploadDocument(login.accessToken, asset, 'other', undefined, 'Certificate of Indigency');
+    const namedTwo = await api.uploadDocument(login.accessToken, asset, 'other', undefined, 'School Enrollment Proof');
+    assert.notEqual(namedOne.id, namedTwo.id, 'The same bytes can satisfy separate named requirements');
+    assert.equal(namedOne.documentName, 'Certificate of Indigency'); assert.equal(namedTwo.documentName, 'School Enrollment Proof');
+    assert.equal((await api.uploadDocument(login.accessToken, asset, 'other', undefined, 'Certificate of Indigency')).id, namedOne.id);
+    assert.equal((await submitNamed()).status, 409, 'A birth certificate is still required');
+    const birth = await api.uploadDocument(login.accessToken, asset, 'birth_certificate');
+    const namedEnrollment = await staffRequest(`/programs/${namedProgram}/enrollments`, staffToken, { beneficiaryId });
+    const namedEnrollmentId = namedEnrollment.enrollment.enrollmentId;
+    await staffRequest(`/enrollments/${namedEnrollmentId}/start-review`, reviewerToken);
+    assert.equal((await review(namedOne.id, { decision: 'REJECTED', reason: 'Correct the named certificate sample.' })).status, 200);
+    await assert.rejects(api.uploadDocument(login.accessToken, correctedAsset, 'other', namedOne.id, 'School Enrollment Proof'), error => error.code === 'DOCUMENT_NAME_MISMATCH');
+    await assert.rejects(api.uploadDocument(otherLogin.accessToken, correctedAsset, 'other', namedOne.id, 'Certificate of Indigency'), error => error.status === 404);
+    const namedCorrection = await api.uploadDocument(login.accessToken, correctedAsset, 'other', namedOne.id, ' certificate   of indigency ');
+    assert.equal(namedCorrection.documentName, 'Certificate of Indigency', 'Corrections retain the original canonical requirement');
+    assert.equal((await api.uploadDocument(login.accessToken, correctedAsset, 'other', namedOne.id)).id, namedCorrection.id);
+    for (const id of [namedCorrection.id, namedTwo.id, birth.id]) assert.equal((await review(id, { decision: 'ACCEPTED' })).status, 200);
+    await staffRequest(`/enrollments/${namedEnrollmentId}/approve`, reviewerToken, { remarks: 'All synthetic named requirements accepted.' });
+    assert.equal((await api.getBeneficiaryOverview(login.accessToken)).enrollments.find(item => item.id === namedEnrollmentId).status, 'approved');
+    const finalNamed = (await api.getDocuments(login.accessToken)).filter(item => item.docType === 'other');
+    assert.equal(finalNamed.find(item => item.id === namedOne.id).status, 'superseded');
+    assert.ok(finalNamed.some(item => item.id === namedCorrection.id && item.documentName === 'Certificate of Indigency' && item.status === 'accepted'));
+    const visibleToStaff = await fetch(`${base}/beneficiaries/${beneficiaryId}/documents`, { headers: { Authorization: `Bearer ${staffToken}` } });
+    assert.equal((await visibleToStaff.json()).data.documents.find(item => item.documentId === namedCorrection.id).documentName, 'Certificate of Indigency');
     await api.logout(login.accessToken);
+    await assert.rejects(api.getDocumentRequirements(login.accessToken), error => error.status === 401);
     await assert.rejects(api.getCurrentBeneficiary(login.accessToken), (error) => error.status === 401);
     await assert.rejects(overview(), (error) => error.status === 401);
     await assert.rejects(records(), (error) => error.status === 401);

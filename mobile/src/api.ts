@@ -4,6 +4,7 @@ import type { DocumentPickerAsset } from 'expo-document-picker';
 const configuredUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 export const API_URL =
   configuredUrl ?? (Platform.OS === 'android' ? 'http://10.0.2.2:3000' : 'http://127.0.0.1:3000');
+export const IS_SHARED_BACKEND = API_URL.endsWith('/api/v1/mobile');
 
 export class ApiRequestError extends Error {
   constructor(
@@ -123,6 +124,7 @@ export type DocumentType = 'proof_of_residency' | 'valid_id' | 'other' | 'birth_
 export type BeneficiaryDocument = {
   id: string;
   docType: DocumentType;
+  documentName?: string | null;
   originalName: string;
   mimeType: string;
   sizeBytes: number;
@@ -384,9 +386,20 @@ export async function getDocuments(accessToken: string) {
   })).data;
 }
 
-export async function uploadDocument(accessToken: string, asset: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string) {
-  const sharedBackend = API_URL.endsWith('/api/v1/mobile');
+export type DocumentRequirement = { docType: DocumentType; documentName: string | null };
+export type DocumentRequirements = { programs: { id: string; code: string; name: string; status: string; requirements: DocumentRequirement[] }[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number } };
+export async function getDocumentRequirements(accessToken: string, page = 1) {
+  return (await request<{ data: DocumentRequirements }>(`/beneficiaries/me/document-requirements?page=${page}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })).data;
+}
+export async function uploadDocument(accessToken: string, asset: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string, documentName?: string) {
+  const sharedBackend = IS_SHARED_BACKEND;
   if (replacesDocumentId && !sharedBackend) throw new ApiRequestError('DOCUMENT_REPLACEMENT_UNAVAILABLE', 'Document corrections require the shared backend.');
+  if (documentName && !sharedBackend) throw new ApiRequestError('NAMED_DOCUMENT_UNAVAILABLE', 'Named requirements require the shared backend.');
+  const requestedName = docType === 'other' ? documentName?.trim() : undefined;
+  if (requestedName && requestedName.length > 150) throw new ApiRequestError('DOCUMENT_NAME_TOO_LONG', 'Use a requested document name up to 150 characters.');
   const extension = /\.([a-z0-9]+)$/i.exec(asset.name)?.[1].toLowerCase();
   const mimeType = ({ pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png' } as Record<string, string>)[extension ?? ''];
   if (!mimeType) throw new ApiRequestError('UNSUPPORTED_FILE_TYPE', 'Choose a PDF, JPEG, or PNG file.');
@@ -408,6 +421,7 @@ export async function uploadDocument(accessToken: string, asset: DocumentPickerA
   if (sharedBackend) {
     const body = new FormData();
     body.append('documentType', docType.toUpperCase());
+    if (requestedName) body.append('documentName', requestedName);
     if (Platform.OS === 'web') body.append('file', new Blob([contents], { type: mimeType }), asset.name);
     else body.append('file', { uri: asset.uri, name: asset.name, type: mimeType } as unknown as Blob);
     const suffix = replacesDocumentId ? `/${encodeURIComponent(replacesDocumentId)}/replacement` : '';

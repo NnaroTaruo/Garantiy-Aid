@@ -1,0 +1,114 @@
+diff --git a/docs/mobile-document-requirements-integration.md b/docs/mobile-document-requirements-integration.md
+new file mode 100644
+index 0000000..e58cd9e
+--- /dev/null
++++ b/docs/mobile-document-requirements-integration.md
+@@ -0,0 +1,13 @@
++# Mobile document checklists and named uploads
++
++Phase 10 follows backend 42b4552 with the six preceding mobile patches (v4, claims, notifications, SMS, biometrics, support). Apply mobile-document-requirements.patch last. No migration, dependency or staff frontend change is needed.
++
++GET /api/v1/mobile/beneficiaries/me/document-requirements requires a mobile session. It accepts page (default 1) and pageSize (default 10, maximum 20), and returns programs plus pagination. A program contains only id, code, name, status and requirements. Each requirement contains docType and nullable documentName. All ACTIVE program checklists are readable for preparation; CLOSED programs appear only if the signed-in beneficiary has an enrollment in them. DRAFT/CANCELLED programs and other people's closed-program enrollments are excluded. Viewing a checklist does not submit an application, evaluate criteria or approve eligibility. Staff fields, budget, criteria and enrollment records are not returned.
++
++Other requirements expand otherRequiredDocumentNames into separate entries, with the older singular name as fallback. These are the same strings used by staff enrollment validation. Documents remain beneficiary-level records reusable across programs; there is no new document-to-program approval or invented requirement ID.
++
++Mobile document metadata now includes nullable documentName. Existing multipart uploads accept that field through the shared metadata validator. Mobile sends a trimmed name for OTHER and all eight supported types are selectable. Identical bytes under different named requirements remain distinct; exact retries retain the existing record. Receiving a named file still requires staff review and does not approve enrollment.
++
++An OTHER correction retains its original documentName, including its canonical spelling. A supplied equivalent name is compared after trimming/case/whitespace normalization; a different name returns DOCUMENT_NAME_MISMATCH. A named correction cannot repurpose a previously unnamed record. Omitting the name preserves legacy correction behavior. Existing owner checks, review transitions, replacement replay, private file storage and failed-upload cleanup remain in effect.
++
++Verification: run mobile npm.cmd run test:shared sequentially against isolated migrated PostgreSQL 51244. The actual client/API suite checks program visibility/privacy/pagination/auth, distinct same-content named uploads, retries, rejection/correction with canonical name retention, cross-owner rejection, staff visibility and successful enrollment approval only after both named documents and the birth certificate are accepted. Mobile regressions cover web/native multipart names, validation, EN/BS failed input, immutable correction names and stale checklist responses. No live beneficiary records are changed by these synthetic tests.
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index 8311f0d..495cdfa 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -7,7 +7,8 @@ import { createMobileSupportRequest, getMobileSupportRequest, listMobileSupportR
+ import { mobileSupportCreateSchema, mobileSupportReplySchema, mobileSupportParamsSchema, mobileSupportListSchema } from "./mobile.schemas.js";
+ import { uploadBeneficiaryDocument } from "../documents/beneficiaryDocument.upload.js";
+ import { beneficiaryDocumentParamsSchema } from "../documents/beneficiaryDocument.schemas.js";
+-import { downloadMobileDocument, listMobileDocuments, uploadMobileDocument } from "./mobileDocuments.controller.js";
++import { downloadMobileDocument, listMobileDocuments, listMobileDocumentRequirements, uploadMobileDocument } from "./mobileDocuments.controller.js";
++import { mobileDocumentRequirementQuerySchema } from "./mobile.schemas.js";
+ import { getMobileOverview } from "./mobileOverview.service.js";
+ import { issueMobileClaimPass } from "./mobileClaimPass.service.js";
+ import { getMobileWallet } from "./mobileWallet.service.js";
+@@ -83,6 +84,7 @@ mobileRoutes.post("/beneficiaries/me/claim-pass", mobileAuthenticationRateLimite
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await issueMobileClaimPass(req.mobileSession) });
+ }));
+ mobileRoutes.get("/beneficiaries/me/documents", listMobileDocuments);
++mobileRoutes.get("/beneficiaries/me/document-requirements", validateQuery(mobileDocumentRequirementQuerySchema), listMobileDocumentRequirements);
+ mobileRoutes.post("/beneficiaries/me/documents", uploadBeneficiaryDocument, uploadMobileDocument);
+ mobileRoutes.post("/beneficiaries/me/documents/:documentId/replacement", validateParams(beneficiaryDocumentParamsSchema.pick({ documentId: true })), uploadBeneficiaryDocument, uploadMobileDocument);
+ mobileRoutes.get("/beneficiaries/me/documents/:documentId/content", validateParams(beneficiaryDocumentParamsSchema.pick({ documentId: true })), downloadMobileDocument);
+diff --git a/src/modules/mobile/mobile.schemas.js b/src/modules/mobile/mobile.schemas.js
+index 96293ba..60fdc63 100644
+--- a/src/modules/mobile/mobile.schemas.js
++++ b/src/modules/mobile/mobile.schemas.js
+@@ -37,6 +37,8 @@ export const mobileSupportReplySchema = chatbotMessageSchema.extend({ messageId:
+ export const mobileSupportParamsSchema = z.object({ requestId: z.uuid() }).strict();
+ export const mobileSupportListSchema = z.object({ page: z.coerce.number().int().min(1).max(100000).default(1),
+   pageSize: z.coerce.number().int().min(1).max(20).default(20) }).strict();
++export const mobileDocumentRequirementQuerySchema = z.object({ page: z.coerce.number().int().min(1).max(100000).default(1),
++  pageSize: z.coerce.number().int().min(1).max(20).default(10) }).strict();
+ export const mobileOtpVerificationSchema = mobileOtpRequestSchema.extend({ code: z.string().regex(/^\d{6}$/) }).strict();
+ export const mobileProfileSchema = z.object({ firstName: name, middleName, lastName: name, address, barangayId })
+   .partial().strict().refine((value) => Object.keys(value).length > 0, "Supply a name, address, or barangay change.");
+diff --git a/src/modules/mobile/mobileDocuments.controller.js b/src/modules/mobile/mobileDocuments.controller.js
+index 9108fa8..bb1a651 100644
+--- a/src/modules/mobile/mobileDocuments.controller.js
++++ b/src/modules/mobile/mobileDocuments.controller.js
+@@ -8,13 +8,14 @@ import { lockMobileSession } from "./mobile.service.js";
+ 
+ // Only beneficiary-facing metadata; never expose file paths, hashes, or staff identities.
+ const mobileDocumentSelect = {
+-  documentId: true, documentType: true, originalFileName: true, mimeType: true, fileSize: true,
++  documentId: true, documentType: true, documentName: true, originalFileName: true, mimeType: true, fileSize: true,
+   reviewStatus: true, reviewedAt: true, reviewNotes: true, replacesDocumentId: true, createdAt: true,
+ };
+ 
+ function mobileDocument(document) {
+   return {
+     id: document.documentId, docType: document.documentType.toLowerCase(),
++    documentName: document.documentName ?? null,
+     originalName: document.originalFileName, mimeType: document.mimeType, sizeBytes: document.fileSize,
+     status: ({ SUBMITTED: "received", ACCEPTED: "accepted", REJECTED: "rejected", SUPERSEDED: "superseded" })[document.reviewStatus],
+     reviewNotes: document.reviewNotes, reviewedAt: document.reviewedAt,
+@@ -22,6 +23,25 @@ function mobileDocument(document) {
+   };
+ }
+ 
++export const listMobileDocumentRequirements = asyncHandler(async (req, res) => {
++  const { page, pageSize } = req.validatedQuery;
++  const where = { OR: [{ status: "ACTIVE" }, { status: "CLOSED", enrollments: { some: { beneficiaryId: req.mobileSession.account.beneficiaryId } } }] };
++  const result = await prisma.$transaction(async tx => {
++    const total = await tx.program.count({ where });
++    const programs = await tx.program.findMany({ where, select: { programId: true, programCode: true, programName: true,
++      status: true, requiredDocumentTypes: true, otherRequiredDocumentNames: true, otherRequiredDocumentName: true },
++      orderBy: [{ programName: "asc" }, { programId: "asc" }], skip: (page - 1) * pageSize, take: pageSize });
++    return { programs: programs.map(program => {
++      const names = program.otherRequiredDocumentNames.length ? program.otherRequiredDocumentNames
++        : program.otherRequiredDocumentName ? [program.otherRequiredDocumentName] : [];
++      return { id: program.programId, code: program.programCode, name: program.programName, status: program.status.toLowerCase(),
++        requirements: program.requiredDocumentTypes.flatMap(type => type === "OTHER" && names.length
++          ? names.map(documentName => ({ docType: "other", documentName })) : [{ docType: type.toLowerCase(), documentName: null }]) };
++    }), pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } };
++  }, { isolationLevel: "RepeatableRead" });
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: result });
++});
++
+ export const listMobileDocuments = asyncHandler(async (req, res) => {
+   const documents = await prisma.beneficiaryDocument.findMany({
+     where: { beneficiaryId: req.mobileSession.account.beneficiaryId, reviewStatus: { not: "REMOVED" } },
+@@ -43,10 +63,11 @@ export const uploadMobileDocument = asyncHandler(async (req, res) => {
+         const original = await tx.beneficiaryDocument.findFirst({ where: { documentId: replacementId, beneficiaryId } });
+         if (!original) throw new AppError(404, "BENEFICIARY_DOCUMENT_NOT_FOUND", "Document not found.");
+         if (original.documentType === "OTHER") {
+-          if (uploaded.documentName && original.documentName && uploaded.documentName.toLowerCase() !== original.documentName.toLowerCase()) {
++          const normalize = value => value?.trim().toLowerCase().replace(/\s+/g, " ") ?? null;
++          if (uploaded.documentName && normalize(uploaded.documentName) !== normalize(original.documentName)) {
+             throw new AppError(409, "DOCUMENT_NAME_MISMATCH", "Replace the same named document; upload a different requirement separately.");
+           }
+-          uploaded.documentName ??= original.documentName ?? null;
++          uploaded.documentName = original.documentName ?? null;
+         }
+         const existing = await tx.beneficiaryDocument.findUnique({ where: { replacesDocumentId: replacementId } });
+         if (existing) {

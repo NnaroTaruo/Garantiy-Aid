@@ -60,7 +60,7 @@ type DemoState = {
   documentsLoading: boolean;
   documentsError: boolean;
   refreshDocuments: () => Promise<void>;
-  submitDocument: (file: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string) => Promise<BeneficiaryDocument | null>;
+  submitDocument: (file: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string, documentName?: string) => Promise<BeneficiaryDocument | null>;
   overview: BeneficiaryOverview | null;
   overviewLoading: boolean;
   overviewError: boolean;
@@ -279,11 +279,11 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       if (version === sessionVersion.current && request === documentRequest.current) setDocumentsLoading(false);
     }
   };
-  const submitDocument = async (file: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string) => {
+  const submitDocument = async (file: DocumentPickerAsset, docType: DocumentType, replacesDocumentId?: string, documentName?: string) => {
     const version = renderedSessionVersion;
     if (!accessToken || version !== sessionVersion.current) return null;
     try {
-      const saved = await uploadDocument(accessToken, file, docType, replacesDocumentId);
+      const saved = await uploadDocument(accessToken, file, docType, replacesDocumentId, documentName);
       if (version !== sessionVersion.current) return null;
       setDocuments((previous) => [saved, ...(previous ?? []).filter((item) => item.id !== saved.id).map((item) =>
         item.id === saved.replacesDocumentId ? { ...item, status: 'superseded', canReplace: false } : item)]);

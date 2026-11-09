@@ -1,4 +1,5 @@
 import { SupportContent } from './support';
+import { DocumentChecklist } from './document-checklist';
 import { BiometricPrivacy } from './biometrics';
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, Switch, View } from 'react-native';
@@ -39,12 +40,13 @@ import {
 } from '../components';
 import { appointment as a, peso, signedPeso, useDemo } from '../state';
 import { colors as c, fonts } from '../theme';
-import { ApiRequestError, getBarangays, issueClaimPass, requestOtp, MAX_DOCUMENT_BYTES, type Barangay, type Beneficiary, type ProfileUpdate, type BeneficiaryDocument, type DocumentType, type ClaimPass as ClaimPassData } from '../api';
+import { ApiRequestError, getBarangays, issueClaimPass, requestOtp, MAX_DOCUMENT_BYTES, IS_SHARED_BACKEND, type Barangay, type Beneficiary, type ProfileUpdate, type BeneficiaryDocument, type DocumentType, type ClaimPass as ClaimPassData } from '../api';
 import {
   formatDate,
   formatDateTime,
   formatQueueNumber,
   formatStatus,
+  formatDocumentType,
   formatTimeSlot,
   formatTransactionType,
 } from '../format';
@@ -1069,6 +1071,8 @@ function DocumentUploads() {
   const { documents, documentsLoading, documentsError, refreshDocuments, submitDocument, t } = useDemo();
   const [file, setFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [docType, setDocType] = useState<DocumentType>('proof_of_residency');
+  const [documentName, setDocumentName] = useState('');
+  const [moreCategories, setMoreCategories] = useState(false);
   const [errorCode, setErrorCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [uploaded, setUploaded] = useState<BeneficiaryDocument | null>(null);
@@ -1080,11 +1084,11 @@ function DocumentUploads() {
     void refreshDocuments();
     return () => { active.current = false; };
   }, []);
-  const categories = [
-    { value: 'proof_of_residency', label: t('Proof of residence', 'Pamatuod sa pinuy-anan') },
-    { value: 'valid_id', label: t('Identification document', 'Dokumento sa pagkaila') },
-    { value: 'other', label: t('Other requested document', 'Laing gipangayo nga dokumento') },
-  ] as const;
+  const commonTypes: DocumentType[] = ['proof_of_residency', 'valid_id', 'other'];
+  const extraTypes: DocumentType[] = ['birth_certificate', 'barangay_certificate', 'medical_certificate', 'pwd_id', 'senior_citizen_id'];
+  const types = !IS_SHARED_BACKEND ? commonTypes : moreCategories ? [...commonTypes, ...extraTypes]
+    : [...commonTypes, ...(commonTypes.includes(docType) ? [] : [docType])];
+  const categories = types.map(value => ({ value, label: formatDocumentType(value, t) }));
   const pick = async () => {
     if (busyRef.current) return;
     try {
@@ -1111,12 +1115,13 @@ function DocumentUploads() {
   };
   const upload = async () => {
     if (!file || busyRef.current) return;
+    if (IS_SHARED_BACKEND && docType === 'other' && !replacing && !documentName.trim()) { setErrorCode('DOCUMENT_NAME_REQUIRED'); return; }
     busyRef.current = true;
     setBusy(true);
     setErrorCode('');
     setUploaded(null);
     try {
-      const saved = await submitDocument(file, docType, replacing?.id);
+      const saved = await submitDocument(file, docType, replacing?.id, docType === 'other' ? documentName.trim() || undefined : undefined);
       if (active.current && saved) {
         setUploaded(saved);
         setFile(null);
@@ -1129,7 +1134,13 @@ function DocumentUploads() {
       if (active.current) setBusy(false);
     }
   };
-  const errorMessage = errorCode === 'DOCUMENT_TOO_LARGE' || errorCode === 'PAYLOAD_TOO_LARGE'
+  const errorMessage = errorCode === 'DOCUMENT_NAME_REQUIRED'
+    ? t('Enter the document name requested by staff, or choose it from a program checklist.', 'Isulat ang ngalan sa dokumento nga gipangayo sa staff, o pilia gikan sa checklist.')
+    : errorCode === 'DOCUMENT_NAME_TOO_LONG'
+      ? t('Use a requested document name up to 150 characters.', 'Gamita ang ngalan nga hangtod 150 ka karakter.')
+      : errorCode === 'DOCUMENT_NAME_MISMATCH'
+        ? t('A correction must keep the original requested document name. Refresh your documents.', 'Kinahanglang pareho ang orihinal nga ngalan sa dokumento sa pagtul-id. I-refresh ang mga dokumento.')
+        : errorCode === 'DOCUMENT_TOO_LARGE' || errorCode === 'PAYLOAD_TOO_LARGE'
     ? t('Choose a file up to 5 MB.', 'Pagpili og file nga hangtod 5 MB.')
     : errorCode === 'UNSUPPORTED_FILE_TYPE' || errorCode === 'FILE_TYPE_MISMATCH' || errorCode === 'INVALID_DOCUMENT_CONTENT'
       ? t('Choose a valid PDF, JPEG, or PNG file with the matching extension.', 'Pagpili og hustong PDF, JPEG, o PNG nga file nga sakto ang extension.')
@@ -1152,16 +1163,17 @@ function DocumentUploads() {
       </Notice>
       {replacing ? <>
         <Notice>{t('Correcting: ', 'Gitul-id: ')}{replacing.originalName}{'\n'}{t('Choose the corrected file below. It will be sent for another staff review.', 'Pilia ang gitul-id nga file sa ubos. Ipadala kini alang sa laing review sa staff.')}</Notice>
-        <Button variant="outline" disabled={busy} onPress={() => { setReplacing(null); setFile(null); setErrorCode(''); setDocType('proof_of_residency'); }}>
+        <Button variant="outline" disabled={busy} onPress={() => { setReplacing(null); setFile(null); setErrorCode(''); setDocType('proof_of_residency'); setDocumentName(''); }}>
           {t('Cancel correction', 'Kanselaha ang pagtul-id')}
         </Button>
       </> : <>
+      <DocumentChecklist disabled={busy} onChoose={requirement => { setDocType(requirement.docType); setDocumentName(requirement.documentName ?? ''); setMoreCategories(false); setUploaded(null); setErrorCode(''); }} />
       <Txt variant="label">{t('Document category', 'Klase sa dokumento')}</Txt>
       <View accessibilityRole="radiogroup" accessibilityLabel={t('Document category', 'Klase sa dokumento')} style={{ gap: 8 }}>
         {categories.map((category) => (
           <Pressable key={category.value} accessibilityRole="radio" disabled={busy}
             accessibilityState={{ checked: docType === category.value, disabled: busy }}
-            onPress={() => { setDocType(category.value); setUploaded(null); }}
+            onPress={() => { if (category.value !== docType) setDocumentName(''); setDocType(category.value); setMoreCategories(false); setUploaded(null); }}
             style={[styles.input, styles.row, { gap: 8 }, docType === category.value && { borderColor: c.primary, backgroundColor: c.primarySoft }]}
           >
             {docType === category.value && <Check size={18} color={c.primary} />}
@@ -1169,7 +1181,13 @@ function DocumentUploads() {
           </Pressable>
         ))}
       </View>
+      {IS_SHARED_BACKEND && <Button variant="outline" disabled={busy} onPress={() => setMoreCategories(!moreCategories)}>
+        {moreCategories ? t('Show fewer categories', 'Ipakita ang mas diyutay nga klase') : t('More document categories', 'Dugang nga klase sa dokumento')}
+      </Button>}
       </>}
+      {IS_SHARED_BACKEND && docType === 'other' && <Field label={t('Requested document name', 'Ngalan sa gipangayong dokumento')}
+        value={documentName} onChangeText={value => { setDocumentName(value); setUploaded(null); }} maxLength={150} editable={!busy && !replacing}
+        placeholder={t('Use the exact name provided by staff', 'Gamita ang eksaktong ngalan gikan sa staff')} />}
       {file && <Card>
         <Txt variant="label">{file.name}</Txt>
         <Txt variant="small">{file.size === undefined ? t('Size will be checked before upload.', 'Susihon ang gidak-on sa dili pa i-upload.') : `${(file.size / 1024).toFixed(1)} KB`}</Txt>
@@ -1193,7 +1211,7 @@ function DocumentUploads() {
       {(documents ?? []).map((document) => (
         <Card key={document.id}>
           <Txt variant="label">{document.originalName}</Txt>
-          <Txt variant="small">{categories.find((category) => category.value === document.docType)?.label ?? formatStatus(document.docType)}</Txt>
+          <Txt variant="small">{document.documentName ?? formatDocumentType(document.docType, t)}</Txt>
           <Txt variant="small">{`${(document.sizeBytes / 1024).toFixed(1)} KB · ${formatDateTime(document.createdAt)}`}</Txt>
           <Badge tone={document.status === 'verified' || document.status === 'accepted' ? 'success' : document.status === 'rejected' ? 'error' : 'warning'}>
             {document.status === 'received' ? t('Received · awaiting staff review', 'Nadawat · naghulat sa review sa staff')
@@ -1204,7 +1222,7 @@ function DocumentUploads() {
           {document.reviewedAt && <Txt variant="small">{t('Reviewed: ', 'Gi-review: ')}{formatDateTime(document.reviewedAt)}</Txt>}
           {document.reviewNotes && <Notice tone={document.status === 'rejected' ? 'error' : 'info'}>{t('Staff feedback: ', 'Tubag sa staff: ')}{document.reviewNotes}</Notice>}
           {document.canReplace && <Button variant="outline" disabled={busy} onPress={() => {
-            setReplacing(document); setDocType(document.docType); setFile(null); setUploaded(null); setErrorCode('');
+            setReplacing(document); setDocType(document.docType); setDocumentName(document.documentName ?? ''); setFile(null); setUploaded(null); setErrorCode('');
           }}>{t('Upload corrected document', 'I-upload ang gitul-id nga dokumento')}</Button>}
         </Card>
       ))}

@@ -38,6 +38,19 @@ export function formatStatus(status: string) {
     .join(' ');
 }
 
+export function formatDocumentType(type: string, t: (en: string, bs: string) => string) {
+  const labels: Record<string, string> = {
+    proof_of_residency: t('Proof of residence', 'Pamatuod sa pinuy-anan'),
+    valid_id: t('Identification document', 'Dokumento sa pagkaila'),
+    other: t('Other requested document', 'Laing gipangayo nga dokumento'),
+    birth_certificate: t('Birth certificate', 'Sertipiko sa pagkatawo'),
+    barangay_certificate: t('Barangay certificate', 'Sertipiko sa barangay'),
+    medical_certificate: t('Medical certificate', 'Medikal nga sertipiko'),
+    pwd_id: t('PWD ID', 'PWD ID'), senior_citizen_id: t('Senior citizen ID', 'Senior citizen ID'),
+  };
+  return labels[type] ?? formatStatus(type);
+}
+
 export function formatClaimStatus(status: string, t: (en: string, bs: string) => string, deliveryMode?: string) {
   const labels: Record<string, string> = {
     not_claimed: t('Scheduled', 'Naka-iskedyul'),

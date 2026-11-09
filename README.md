@@ -27,6 +27,8 @@ Phase 8 saves mobile biometric consent, displays facilitator enrollment status a
 
 Phase 9 connects Help > Talk to staff to the existing staff escalation queue. Beneficiaries can save concerns, reopen requests, send follow-ups and refresh for staff replies/resolution. Ownership, retries and barangay staff scope are enforced; no external AI or delivery service is needed. Apply `mobile-support.patch` after the biometric patch. It adds no migration or dependency. See [support setup](mobile/docs/support-setup.md). Updates currently use manual refresh.
 
+Phase 10 adds staff-defined program document checklists and named Other uploads/corrections. Mobile retains the exact requested name so staff enrollment validation can distinguish requirements. Apply `mobile-document-requirements.patch` after the support patch; no migration or dependency is added. See [document checklists](mobile/docs/document-checklists.md) and [remaining work](mobile/docs/remaining-work.md).
+
 Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. These READMEs describe the later milestones.
 
 If the PDF preview does not open, use the [direct PDF download](https://raw.githubusercontent.com/NnaroTaruo/Garantiy-Aid/main/output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf).
