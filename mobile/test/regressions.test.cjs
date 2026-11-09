@@ -19,6 +19,7 @@ function loadSource(file, mocks, globals = {}) {
       if (name === './biometrics') return { BiometricSummary: 'BiometricSummary', BiometricPrivacy: 'BiometricPrivacy', BiometricConsentScreen: 'BiometricConsentScreen', BiometricEnrollmentScreen: 'BiometricEnrollmentScreen' };
       if (name === './support') return { SupportContent: 'SupportContent' };
       if (name === './document-checklist') return { DocumentChecklist: 'DocumentChecklist' };
+      if (name === './document-preview') return { DocumentPreview: 'DocumentPreview' };
       assert.ok(name in mocks, `Unexpected import: ${name}`);
       return mocks[name];
     },
@@ -31,6 +32,151 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+
+test('document downloads authenticate privately, validate saved bytes, and reject unavailable or mismatched files', async () => {
+  const bytes = new TextEncoder().encode('%PDF-1.4\nSynthetic transport fixture').buffer;
+  const record = { ...document('saved/id'), mimeType: 'application/pdf', sizeBytes: bytes.byteLength };
+  let reply = { type: 'application/pdf', bytes, status: 200 }, calls = 0, reads = 0;
+  const api = loadSource('api.ts', { 'react-native': { Platform: { OS: 'web' } } }, {
+    process: { env: { EXPO_PUBLIC_API_URL: 'http://127.0.0.1:4000/api/v1/mobile' } }, AbortController, setTimeout, clearTimeout,
+    fetch: async (url, init) => {
+      calls++; assert.ok(url.endsWith('/documents/saved%2Fid/content')); assert.ok(!url.includes('private-session'));
+      assert.equal(init.headers.Authorization, 'Bearer private-session'); assert.equal(init.cache, 'no-store'); assert.equal(init.redirect, 'error');
+      return { ok: reply.status === 200, status: reply.status, headers: new Headers({ 'content-type': reply.type, 'content-length': String(reply.length ?? reply.bytes.byteLength) }),
+        json: async () => ({ error: { code: 'DOCUMENT_FILE_NOT_FOUND', message: 'Do not expose a private server message.' } }),
+        arrayBuffer: async () => { reads++; return reply.bytes; } };
+    },
+  });
+  assert.equal((await api.downloadDocument('private-session', record)).bytes.length, bytes.byteLength);
+  for (const status of [401, 404, 503]) {
+    reply.status = status;
+    await assert.rejects(api.downloadDocument('private-session', record), error => error.status === status && !error.message.includes('private server message'));
+  }
+  reply = { type: 'text/html', bytes, status: 200 };
+  await assert.rejects(api.downloadDocument('private-session', record), error => error.code === 'DOCUMENT_PREVIEW_INVALID');
+  reply = { type: 'application/pdf', bytes: new TextEncoder().encode('<html>not a document</html>').buffer, status: 200 };
+  await assert.rejects(api.downloadDocument('private-session', { ...record, sizeBytes: reply.bytes.byteLength }), error => error.code === 'DOCUMENT_PREVIEW_INVALID');
+  reply = { type: 'application/pdf', bytes, status: 200, length: 6 * 1024 * 1024 }; const before = reads;
+  await assert.rejects(api.downloadDocument('private-session', record), error => error.code === 'DOCUMENT_PREVIEW_INVALID'); assert.equal(reads, before);
+  const beforeRequests = calls;
+  await assert.rejects(api.downloadDocument('private-session', { ...record, sizeBytes: 6 * 1024 * 1024 }), error => error.code === 'DOCUMENT_PREVIEW_INVALID');
+  assert.equal(calls, beforeRequests);
+});
+
+test('closing a document download aborts its private request', async () => {
+  let signal;
+  const api = loadSource('api.ts', { 'react-native': { Platform: { OS: 'android' } } }, {
+    process: { env: {} }, AbortController, setTimeout, clearTimeout,
+    fetch: async (_url, init) => { signal = init.signal; return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))); },
+  });
+  const controller = new AbortController();
+  const pending = api.downloadDocument('private', { ...document('saved'), mimeType: 'application/pdf' }, controller.signal);
+  controller.abort(); await assert.rejects(pending, error => error.code === 'DOCUMENT_DOWNLOAD_FAILED'); assert.equal(signal.aborted, true);
+});
+
+test('browser document copies use revocable blob URLs and safe filenames without exposing API credentials', async () => {
+  const urls = [], revoked = [], links = [];
+  class FileError extends Error { constructor(code) { super(code); this.code = code; } }
+  const adapter = loadSource('document-file.ts', { 'react-native': { Platform: { OS: 'web' } }, './api': { ApiRequestError: FileError } }, {
+    Blob, URL: { createObjectURL: blob => { urls.push(blob); return 'blob:private-local-copy'; }, revokeObjectURL: value => revoked.push(value) },
+    document: { createElement: () => ({ click() { this.clicked = true; }, remove() { this.removed = true; } }), body: { appendChild: link => links.push(link) } },
+  });
+  const file = await adapter.prepareDocumentFile({ bytes: new Uint8Array([37, 80, 68, 70, 45]), mimeType: 'application/pdf', name: '../../Unsafe:name.png' });
+  assert.equal(urls[0].type, 'application/pdf'); assert.ok(!file.name.match(/[/:\\]/)); assert.ok(file.name.endsWith('.pdf'));
+  await file.save('Download'); assert.equal(links[0].href, 'blob:private-local-copy'); assert.equal(links[0].download, file.name); assert.equal(links[0].removed, true);
+  file.dispose(); file.dispose(); assert.equal(revoked.length, 1); await assert.rejects(file.save('Download'), error => error.code === 'DOCUMENT_PREVIEW_CLOSED');
+});
+
+test('native document copies stay in app cache, use the system chooser and clean up failed or closed previews', async () => {
+  const entries = new Map(), deleted = [], shared = []; let failWrite = false;
+  const uri = parts => parts.map(part => typeof part === 'string' ? part : part.uri).join('/');
+  class Directory {
+    constructor(...parts) { this.uri = uri(parts); }
+    get exists() { return entries.has(this.uri); }
+    create() { entries.set(this.uri, 'directory'); }
+    delete() { deleted.push(this.uri); for (const path of entries.keys()) if (path === this.uri || path.startsWith(this.uri + '/')) entries.delete(path); }
+  }
+  class File extends Directory {
+    create() { entries.set(this.uri, new Uint8Array()); }
+    write(bytes) { if (failWrite) throw new Error('Synthetic write failure'); entries.set(this.uri, bytes); }
+  }
+  class FileError extends Error { constructor(code) { super(code); this.code = code; } }
+  entries.set('file:///private-cache/garantiyaid-document-previews/leftover/old.pdf', new Uint8Array());
+  entries.set('file:///private-cache/garantiyaid-document-previews', 'directory');
+  const adapter = loadSource('document-file.ts', { 'react-native': { Platform: { OS: 'android' } }, './api': { ApiRequestError: FileError },
+    'expo-file-system': { Directory, File, Paths: { cache: 'file:///private-cache' } },
+    'expo-sharing': { isAvailableAsync: async () => true, shareAsync: async (path, options) => shared.push({ path, options }) } });
+  const input = { bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), mimeType: 'image/png', name: '../my-id.pdf' };
+  const prepared = await adapter.prepareDocumentFile(input);
+  assert.ok(prepared.uri.startsWith('file:///private-cache/garantiyaid-document-previews/')); assert.ok(prepared.uri.endsWith('.png'));
+  assert.ok(!entries.has('file:///private-cache/garantiyaid-document-previews/leftover/old.pdf'));
+  await prepared.save('Choose app'); assert.equal(shared[0].path, prepared.uri); assert.equal(shared[0].options.mimeType, 'image/png');
+  prepared.dispose(); assert.ok(!entries.has(prepared.uri));
+  await assert.rejects(prepared.save('Choose app'), error => error.code === 'DOCUMENT_PREVIEW_CLOSED');
+  entries.clear(); // The OS may reclaim cache while the app is still running.
+  const restored = await adapter.prepareDocumentFile(input);
+  assert.equal(entries.get('file:///private-cache/garantiyaid-document-previews'), 'directory'); restored.dispose();
+  failWrite = true; const before = deleted.length;
+  await assert.rejects(adapter.prepareDocumentFile(input), /Synthetic write failure/); assert.equal(deleted.length, before + 1);
+});
+
+function documentViewer(download, prepare, language = 'en', platform = 'web') {
+  let cursor = 0, effect, resets = 0, closed = 0; const slots = [];
+  const state = { accessToken: 'owner', reset: async () => { resets++; }, t: (en, bs) => language === 'en' ? en : bs };
+  const useState = initial => { const id = cursor++; if (!(id in slots)) slots[id] = initial; return [slots[id], value => { slots[id] = value; }]; };
+  const source = loadSource('screens/document-preview.tsx', {
+    react: { createElement: (type, props, ...children) => ({ type, props, children }), useState,
+      useRef: initial => useState({ current: initial })[0], useEffect: callback => { effect = callback; } },
+    'react-native': { Platform: { OS: platform }, Modal: 'Modal', View: 'View', Image: 'Image' },
+    '../components': new Proxy({}, { get: (_, key) => String(key) }), '../theme': { colors: {} }, '../state': { useDemo: () => state },
+    '../api': { ApiRequestError, downloadDocument: download }, '../document-file': { prepareDocumentFile: prepare },
+  }, { AbortController });
+  const render = () => { cursor = 0; return source.DocumentPreview({ document: document('saved'), onClose: () => { closed++; } }); };
+  const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+  return { render, nodes, start: () => effect(), state, resets: () => resets, closed: () => closed,
+    button: (en, bs) => nodes(render()).find(node => node.type === 'Button' && node.children[0] === state.t(en, bs)) };
+}
+
+test('document previews discard pending files and unauthorized results after closing', async () => {
+  for (const stage of ['download', 'prepare', 'unauthorized']) {
+    const waiting = deferred(); let disposed = 0, prepared = 0, signal;
+    const artifact = { uri: 'blob:private', name: 'Test.pdf', mimeType: 'application/pdf', dispose: () => { disposed++; }, save: async () => {} };
+    const viewer = documentViewer(async (_token, _file, abortSignal) => { signal = abortSignal; return stage === 'prepare' ? {} : waiting.promise; },
+      async () => { prepared++; return stage === 'prepare' ? waiting.promise : artifact; });
+    viewer.render(); const cleanup = viewer.start(); await new Promise(setImmediate); cleanup(); assert.equal(signal.aborted, true);
+    if (stage === 'unauthorized') waiting.reject(new ApiRequestError(401)); else waiting.resolve(stage === 'prepare' ? artifact : {});
+    await new Promise(setImmediate); assert.equal(viewer.resets(), 0);
+    assert.equal(disposed, stage === 'prepare' ? 1 : 0); assert.equal(prepared, stage === 'prepare' ? 1 : 0);
+  }
+});
+
+test('saved document errors retry in EN and BS and current 401 expires the session', async () => {
+  for (const language of ['en', 'bs']) {
+    let calls = 0, disposed = 0;
+    const viewer = documentViewer(async () => { if (++calls === 1) throw new ApiRequestError(404); return {}; },
+      async () => ({ uri: 'blob:private', name: 'Test.pdf', mimeType: 'application/pdf', dispose: () => { disposed++; }, save: async () => {} }), language);
+    viewer.render(); let cleanup = viewer.start(); await new Promise(setImmediate);
+    assert.ok(JSON.stringify(viewer.render()).includes(viewer.state.t('This file is no longer available.', 'Dili na magamit kini nga file.')));
+    viewer.button('Try again', 'Sulayi pag-usab').props.onPress(); cleanup(); viewer.render(); cleanup = viewer.start(); await new Promise(setImmediate);
+    assert.ok(viewer.nodes(viewer.render()).some(node => node.type === 'iframe' && node.props.src === 'blob:private')); cleanup(); assert.equal(disposed, 1);
+  }
+  const expired = documentViewer(async () => { throw new ApiRequestError(401); }, async () => { throw new Error('Do not prepare a file'); });
+  expired.render(); const cleanup = expired.start(); await new Promise(setImmediate); assert.equal(expired.resets(), 1); cleanup();
+});
+
+test('native PDF copy choice prevents double taps, retains preview on failure and releases on close', async () => {
+  let calls = 0, disposed = 0, result = deferred();
+  const viewer = documentViewer(async () => ({}), async () => ({ uri: 'file:///private/test.pdf', name: 'Test.pdf', mimeType: 'application/pdf',
+    dispose: () => { disposed++; }, save: async () => { calls++; return result.promise; } }), 'en', 'android');
+  viewer.render(); const cleanup = viewer.start(); await new Promise(setImmediate);
+  const save = viewer.button('Open or save a copy', 'Ablihi o tipigi ang kopya');
+  const pending = save.props.onPress(); save.props.onPress(); assert.equal(calls, 1);
+  viewer.render().props.onRequestClose(); assert.equal(viewer.closed(), 0);
+  result.reject(new Error('No handler')); await pending;
+  assert.ok(JSON.stringify(viewer.render()).includes('The copy chooser could not be opened.')); assert.equal(disposed, 0);
+  result = deferred(); const next = viewer.button('Open or save a copy', 'Ablihi o tipigi ang kopya').props.onPress(); result.resolve(); await next;
+  viewer.nodes(viewer.render()).find(node => node.type === 'Page').props.footer.props.onPress(); assert.equal(viewer.closed(), 1); cleanup(); assert.equal(disposed, 1);
+});
 
 const biometricRecord = (id, consentStatus = 'active', simulated = true) => ({
   enrollmentMethod: 'staff_assisted', processorMode: simulated ? 'simulated' : 'remote',

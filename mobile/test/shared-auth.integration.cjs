@@ -449,6 +449,27 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     const document = await api.uploadDocument(login.accessToken, asset, 'proof_of_residency');
     assert.equal(document.originalName, asset.name);
     assert.equal(document.status, 'received');
+    const downloaded = await api.downloadDocument(login.accessToken, document);
+    assert.equal(downloaded.mimeType, 'application/pdf'); assert.equal(downloaded.name, asset.name);
+    assert.equal(new TextDecoder().decode(downloaded.bytes), '%PDF-1.4\nSynthetic file\n%%EOF');
+    for (const token of ['', staffToken]) await assert.rejects(api.downloadDocument(token, document), error => error.status === 401);
+    await assert.rejects(api.downloadDocument(otherLogin.accessToken, document), error => error.status === 404);
+    const rawDownload = await fetch(`${base}/mobile/beneficiaries/me/documents/${document.id}/content`, { headers: { Authorization: `Bearer ${login.accessToken}` } });
+    assert.equal(rawDownload.headers.get('cache-control'), 'private, no-store');
+    assert.equal(rawDownload.headers.get('x-content-type-options'), 'nosniff');
+    await rawDownload.arrayBuffer();
+    const pngBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQ0AAAAASUVORK5CYII=', 'base64');
+    const imageAsset = { ...asset, name: 'Misleading-extension.pdf', file: new File([pngBytes], 'Misleading-extension.pdf', { type: 'application/pdf' }) };
+    const imageDocument = await api.uploadDocument(login.accessToken, imageAsset, 'other', undefined, 'Synthetic image copy');
+    assert.equal(imageDocument.mimeType, 'image/png');
+    assert.equal((await api.downloadDocument(login.accessToken, imageDocument)).mimeType, 'image/png', 'Serve saved MIME rather than guessing from the filename');
+    assert.equal((await fetch(`${base}/beneficiaries/${beneficiaryId}/documents/${imageDocument.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${staffToken}` } })).status, 200);
+    await assert.rejects(api.downloadDocument(login.accessToken, imageDocument), error => error.status === 404);
+    const missingFile = await prisma.beneficiaryDocument.create({ data: { beneficiaryId, uploadedByBeneficiaryId: beneficiaryId, documentType: 'OTHER',
+      originalFileName: 'Synthetic-missing.pdf', mimeType: 'application/pdf', fileSize: 12, checksum: '0'.repeat(64),
+      filePath: `uploads/beneficiary-documents/${randomUUID()}.pdf`, reviewStatus: 'SUBMITTED' } });
+    const missingMetadata = (await api.getDocuments(login.accessToken)).find(item => item.id === missingFile.documentId);
+    await assert.rejects(api.downloadDocument(login.accessToken, missingMetadata), error => error.status === 404);
     const staffDocuments = await fetch(`${base}/beneficiaries/${beneficiaryId}/documents`, { headers: { Authorization: `Bearer ${staffToken}` } });
     const staffDocument = (await staffDocuments.json()).data.documents.find((item) => item.documentId === document.id);
     assert.equal(staffDocument.uploadedBy, null);
@@ -457,9 +478,9 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     });
     assert.equal((await review(document.id, { decision: 'REJECTED', reason: 'Please upload a clear copy.' })).status, 200);
     let documents = await api.getDocuments(login.accessToken);
-    assert.equal(documents[0].status, 'rejected');
-    assert.equal(documents[0].reviewNotes, 'Please upload a clear copy.');
-    assert.equal(documents[0].canReplace, true);
+    assert.equal(documents.find(item => item.id === document.id).status, 'rejected');
+    assert.equal(documents.find(item => item.id === document.id).reviewNotes, 'Please upload a clear copy.');
+    assert.equal(documents.find(item => item.id === document.id).canReplace, true);
     const correctedAsset = { ...asset, name: 'Corrected.pdf', file: new File(['%PDF-1.4\nCorrected synthetic file\n%%EOF'], 'Corrected.pdf', { type: 'application/pdf' }) };
     const corrected = await api.uploadDocument(login.accessToken, correctedAsset, 'proof_of_residency', document.id);
     assert.equal(corrected.status, 'received');
@@ -524,6 +545,7 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     const visibleToStaff = await fetch(`${base}/beneficiaries/${beneficiaryId}/documents`, { headers: { Authorization: `Bearer ${staffToken}` } });
     assert.equal((await visibleToStaff.json()).data.documents.find(item => item.documentId === namedCorrection.id).documentName, 'Certificate of Indigency');
     await api.logout(login.accessToken);
+    await assert.rejects(api.downloadDocument(login.accessToken, document), error => error.status === 401);
     await assert.rejects(api.getDocumentRequirements(login.accessToken), error => error.status === 401);
     await assert.rejects(api.getCurrentBeneficiary(login.accessToken), (error) => error.status === 401);
     await assert.rejects(overview(), (error) => error.status === 401);

@@ -1,5 +1,6 @@
 import { SupportContent } from './support';
 import { DocumentChecklist } from './document-checklist';
+import { DocumentPreview } from './document-preview';
 import { BiometricPrivacy } from './biometrics';
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, Switch, View } from 'react-native';
@@ -1069,6 +1070,7 @@ function EnrollmentDocuments() {
 
 function DocumentUploads() {
   const { documents, documentsLoading, documentsError, refreshDocuments, submitDocument, t } = useDemo();
+  const [viewing, setViewing] = useState<BeneficiaryDocument | null>(null);
   const [file, setFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [docType, setDocType] = useState<DocumentType>('proof_of_residency');
   const [documentName, setDocumentName] = useState('');
@@ -1221,12 +1223,14 @@ function DocumentUploads() {
           </Badge>
           {document.reviewedAt && <Txt variant="small">{t('Reviewed: ', 'Gi-review: ')}{formatDateTime(document.reviewedAt)}</Txt>}
           {document.reviewNotes && <Notice tone={document.status === 'rejected' ? 'error' : 'info'}>{t('Staff feedback: ', 'Tubag sa staff: ')}{document.reviewNotes}</Notice>}
+          <Button variant="outline" disabled={busy} onPress={() => setViewing(document)}>{t('View saved document', 'Tan-awa ang natipig nga dokumento')}</Button>
           {document.canReplace && <Button variant="outline" disabled={busy} onPress={() => {
             setReplacing(document); setDocType(document.docType); setDocumentName(document.documentName ?? ''); setFile(null); setUploaded(null); setErrorCode('');
           }}>{t('Upload corrected document', 'I-upload ang gitul-id nga dokumento')}</Button>}
         </Card>
       ))}
       <Button variant="outline" loading={documentsLoading} disabled={busy} onPress={() => void refreshDocuments()}>{t('Refresh documents', 'I-refresh ang mga dokumento')}</Button>
+      {viewing && <DocumentPreview key={viewing.id} document={viewing} onClose={() => setViewing(null)} />}
       <Button variant="outline" onPress={() => go('enrollment-status')}>
         {t('View application status', 'Tan-awa ang kahimtang')}
       </Button>

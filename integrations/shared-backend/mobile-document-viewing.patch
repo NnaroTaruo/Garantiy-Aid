@@ -1,0 +1,34 @@
+diff --git a/docs/mobile-document-viewing-integration.md b/docs/mobile-document-viewing-integration.md
+new file mode 100644
+index 0000000..4c3863a
+--- /dev/null
++++ b/docs/mobile-document-viewing-integration.md
+@@ -0,0 +1,9 @@
++# Mobile saved document viewing
++
++Apply `mobile-document-viewing.patch` after the seven preceding version-4 mobile patches, ending with `mobile-document-requirements.patch`, on backend base `42b4552`. There is no migration or new backend dependency.
++
++The existing `GET /api/v1/mobile/beneficiaries/me/documents/:documentId/content` route still requires the owner's active mobile session and excludes REMOVED records. Missing records/files return 404. Responses retain `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff` and attachment disposition. This phase explicitly sets the saved, upload-validated MIME type before sending the file; the original filename's extension must not override it. Staff authorization, document review, replacement and enrollment policy are unchanged.
++
++Mobile fetches bytes with its bearer header, validates PDF/JPEG/PNG MIME, size and signature, and creates a temporary browser blob or app-cache file. No public file URL or token in a URL is introduced. Web displays images and uses the browser PDF viewer, with a separate download action. Android displays images and uses Expo Sharing's system chooser to open/save a copy, including PDFs. Closing, sign-out/account replacement and stale results dispose of temporary resources; native leftovers from an interrupted process are cleared on the next preview. Copies explicitly saved outside the app remain user-controlled.
++
++The actual TypeScript client/database suite covers file bytes, a PNG with a misleading original PDF extension, owner/staff/session rejection, removed documents, missing files and logout. Mobile regressions cover validation, cancellation, stale results, cleanup and native chooser failures. Isolated browser checks use public sample files and synthetic metadata. Physical Android file opening/saving and the deployed private storage setup still require team validation.
+diff --git a/src/modules/mobile/mobileDocuments.controller.js b/src/modules/mobile/mobileDocuments.controller.js
+index bb1a651..c4db441 100644
+--- a/src/modules/mobile/mobileDocuments.controller.js
++++ b/src/modules/mobile/mobileDocuments.controller.js
+@@ -109,12 +109,13 @@ export const uploadMobileDocument = asyncHandler(async (req, res) => {
+ export const downloadMobileDocument = asyncHandler(async (req, res, next) => {
+   const document = await prisma.beneficiaryDocument.findFirst({
+     where: { documentId: req.validatedParams.documentId, beneficiaryId: req.mobileSession.account.beneficiaryId, reviewStatus: { not: "REMOVED" } },
+-    select: { originalFileName: true, filePath: true },
++    select: { originalFileName: true, filePath: true, mimeType: true },
+   });
+   if (!document) throw new AppError(404, "BENEFICIARY_DOCUMENT_NOT_FOUND", "Document not found.");
+   const file = resolveBeneficiaryDocumentPath(document.filePath);
+   try { await access(file); } catch { throw new AppError(404, "DOCUMENT_FILE_NOT_FOUND", "The stored file is unavailable."); }
+   res.set("X-Content-Type-Options", "nosniff");
+   res.set("Cache-Control", "private, no-store");
++  res.type(document.mimeType);
+   res.download(file, document.originalFileName, (error) => { if (error) next(error); });
+ });

@@ -386,6 +386,44 @@ export async function getDocuments(accessToken: string) {
   })).data;
 }
 
+export type DownloadedDocument = { bytes: Uint8Array; mimeType: string; name: string };
+export async function downloadDocument(accessToken: string, document: BeneficiaryDocument, signal?: AbortSignal): Promise<DownloadedDocument> {
+  const supported = ['application/pdf', 'image/jpeg', 'image/png'];
+  if (!supported.includes(document.mimeType) || document.sizeBytes <= 0 || document.sizeBytes > MAX_DOCUMENT_BYTES) {
+    throw new ApiRequestError('DOCUMENT_PREVIEW_INVALID', 'Choose a saved PDF, JPEG or PNG up to 5 MB.');
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort);
+  if (signal?.aborted) abort();
+  const timeout = setTimeout(abort, 60_000);
+  try {
+    const response = await fetch(`${API_URL}/beneficiaries/me/documents/${encodeURIComponent(document.id)}/content`, {
+      headers: { Authorization: `Bearer ${accessToken}` }, signal: controller.signal, cache: 'no-store', redirect: 'error',
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new ApiRequestError(body?.error?.code ?? 'DOCUMENT_DOWNLOAD_FAILED', 'The saved document could not be loaded.', response.status);
+    }
+    const mimeType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+    const length = Number(response.headers.get('content-length'));
+    if (mimeType !== document.mimeType || length > MAX_DOCUMENT_BYTES) throw new ApiRequestError('DOCUMENT_PREVIEW_INVALID', 'The saved file type or size does not match its record.');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const signature = mimeType === 'application/pdf' ? [37, 80, 68, 70, 45]
+      : mimeType === 'image/png' ? [137, 80, 78, 71, 13, 10, 26, 10] : [255, 216, 255];
+    if (bytes.length !== document.sizeBytes || bytes.length > MAX_DOCUMENT_BYTES || !signature.every((byte, index) => bytes[index] === byte)) {
+      throw new ApiRequestError('DOCUMENT_PREVIEW_INVALID', 'The saved file does not match its record.');
+    }
+    return { bytes, mimeType, name: document.originalName };
+  } catch (cause) {
+    if (cause instanceof ApiRequestError) throw cause;
+    throw new ApiRequestError('DOCUMENT_DOWNLOAD_FAILED', 'The saved document could not be loaded. Try again.');
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
 export type DocumentRequirement = { docType: DocumentType; documentName: string | null };
 export type DocumentRequirements = { programs: { id: string; code: string; name: string; status: string; requirements: DocumentRequirement[] }[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number } };

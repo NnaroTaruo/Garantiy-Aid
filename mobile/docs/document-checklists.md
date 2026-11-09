@@ -12,4 +12,4 @@ You can also select a category manually. More document categories exposes birth/
 
 The original port-3000 backend keeps its original three categories and does not support this shared checklist/name flow. The shared backend uses /api/v1/mobile and an additional GET /beneficiaries/me/document-requirements route. Apply mobile-document-requirements.patch after mobile-support.patch; no extra migration or package is needed. See [shared integration](shared-backend-integration.md).
 
-This phase displays names, review status and feedback. Opening/downloading saved files in mobile remains a separate task. Files stay private; no public file URL or staff credential is placed in the app.
+The checklist phase displays names, review status and feedback. Phase 11 adds View saved document for private preview/download; see [document viewing](document-viewing.md). Files stay private; no public file URL or staff credential is placed in the app.

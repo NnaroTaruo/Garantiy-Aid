@@ -29,6 +29,8 @@ Phase 9 connects Help > Talk to staff to the existing staff escalation queue. Be
 
 Phase 10 adds staff-defined program document checklists and named Other uploads/corrections. Mobile retains the exact requested name so staff enrollment validation can distinguish requirements. Apply `mobile-document-requirements.patch` after the support patch; no migration or dependency is added. See [document checklists](mobile/docs/document-checklists.md) and [remaining work](mobile/docs/remaining-work.md).
 
+Phase 11 opens saved PDF/images through the private owner endpoint. Browsers preview and download temporary blobs; Android previews images and uses the system open/save chooser. Apply `mobile-document-viewing.patch` after the checklist patch for the saved MIME response fix; no migration is needed. Mobile adds SDK-compatible `expo-sharing`. See [document viewing](mobile/docs/document-viewing.md) for testing and temporary-file cleanup; physical Android validation remains pending.
+
 Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. These READMEs describe the later milestones.
 
 If the PDF preview does not open, use the [direct PDF download](https://raw.githubusercontent.com/NnaroTaruo/Garantiy-Aid/main/output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf).
