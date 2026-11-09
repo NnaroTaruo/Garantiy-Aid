@@ -116,6 +116,74 @@ test('existing accounts finish signup through the correct login or registration 
   }
 });
 
+test('account recovery requests the existing login code, prevents duplicate sends, and navigates only after success', async () => {
+  for (const mode of ['development', 'sms', 'leave']) {
+    let cursor = 0, cleanup, navigation, calls = 0, waiting = deferred();
+    const slots = [];
+    const state = { phone: '9171234567', t: en => en, setPhone: value => { state.phone = value; } };
+    const react = {
+      createElement: (type, props, ...children) => ({ type, props, children }),
+      useState: initial => {
+        const index = cursor++;
+        if (!(index in slots)) slots[index] = initial;
+        return [slots[index], value => { slots[index] = value; }];
+      },
+      useRef: initial => {
+        const index = cursor++;
+        if (!(index in slots)) slots[index] = { current: initial };
+        return slots[index];
+      },
+      useEffect: callback => { cleanup ??= callback(); },
+    };
+    const components = new Proxy({}, { get: (_, key) => key === 'flow'
+      ? (step, params) => { navigation = { step, ...params }; } : String(key) });
+    const source = loadSource('screens/details.tsx', {
+      react, 'react-native': {}, 'expo-router': { useLocalSearchParams: () => ({ page: 'reset-password' }) },
+      'expo-document-picker': {}, 'react-native-qrcode-svg': 'QRCode', 'lucide-react-native': components,
+      '../components': components, '../theme': { colors: {}, fonts: {} }, '../format': {}, './main': { s: {} },
+      '../state': { useDemo: () => state }, '../api': { ApiRequestError,
+        requestOtp: async (number, purpose) => {
+          calls++; assert.equal(number, '9171234567'); assert.equal(purpose, 'login');
+          return waiting.promise;
+        } },
+    });
+    const render = () => { cursor = 0; return source.DetailScreen().children[0].children[0].type(); };
+    const nodes = node => Array.isArray(node) ? node.flatMap(nodes)
+      : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+    const send = () => nodes(render()).find(node => node.type === 'Button' && node.children.includes('Send verification code'));
+    const phoneInput = () => nodes(render()).find(node => node.type === 'PhoneField');
+    phoneInput().props.onChangeText('123');
+    await send().props.onPress();
+    assert.equal(calls, 0);
+    assert.ok(phoneInput().props.error);
+    phoneInput().props.onChangeText('9171234567');
+    const sending = send().props.onPress();
+    await send().props.onPress();
+    assert.equal(calls, 1);
+    assert.equal(phoneInput().props.editable, false);
+    waiting.reject(new ApiRequestError(503));
+    await sending;
+    assert.ok(phoneInput().props.error);
+    assert.equal(navigation, undefined);
+    assert.equal(phoneInput().props.editable, true);
+    waiting = deferred();
+    const retry = send().props.onPress();
+    if (mode === 'leave') cleanup();
+    waiting.resolve(mode === 'development' ? { developmentOtp: '123456' } : { expiresInSeconds: 300 });
+    await retry;
+    assert.equal(calls, 2);
+    if (mode === 'leave') assert.equal(navigation, undefined);
+    else {
+      assert.equal(navigation.step, 'otp'); assert.equal(navigation.intent, 'login');
+      assert.equal(navigation.developmentOtp, mode === 'development' ? '123456' : undefined);
+      assert.equal(state.phone, '9171234567');
+    }
+    assert.ok(!JSON.stringify(render()).includes('Preview only'));
+    state.t = (_en, bs) => bs;
+    assert.ok(JSON.stringify(render()).includes('Irecover ang imong account'));
+  }
+});
+
 function provider(api = {}, storage = {}) {
   const slots = [];
   let cursor = 0;

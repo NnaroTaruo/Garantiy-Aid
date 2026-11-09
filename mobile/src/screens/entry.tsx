@@ -766,8 +766,8 @@ function PhoneEntry({ login }: { login: boolean }) {
       />
       <Notice>
         {t(
-          'Development mode shows the generated code on the next screen because SMS is not connected yet.',
-          'Sa development mode, makita ang generated code sa sunod nga screen kay wala pa konektado ang SMS.',
+          'Your verification code expires after five minutes. Keep it private.',
+          'Ma-expire ang imong verification code human sa lima ka minuto. Ayaw kini ipaambit.',
         )}
       </Notice>
     </Page>

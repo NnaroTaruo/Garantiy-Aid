@@ -233,7 +233,7 @@ export async function registerBeneficiary(input: {
   return (
     await request<{
       data: { beneficiary: Beneficiary; verificationRequired: boolean; developmentOtp?: string };
-    }>('/auth/register', { method: 'POST', body: JSON.stringify(input) })
+    }>('/auth/register', { method: 'POST', body: JSON.stringify(input) }, 20_000)
   ).data;
 }
 
@@ -242,7 +242,7 @@ export async function requestOtp(contactNumber: string, purpose: 'register' | 'l
     await request<OtpResponse>('/auth/otp/request', {
       method: 'POST',
       body: JSON.stringify({ contactNumber, purpose }),
-    })
+    }, 20_000)
   ).data;
 }
 

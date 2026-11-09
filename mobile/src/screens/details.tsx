@@ -37,7 +37,7 @@ import {
 } from '../components';
 import { appointment as a, peso, signedPeso, useDemo } from '../state';
 import { colors as c, fonts } from '../theme';
-import { ApiRequestError, getBarangays, issueClaimPass, MAX_DOCUMENT_BYTES, type Barangay, type Beneficiary, type ProfileUpdate, type BeneficiaryDocument, type DocumentType, type ClaimPass as ClaimPassData } from '../api';
+import { ApiRequestError, getBarangays, issueClaimPass, requestOtp, MAX_DOCUMENT_BYTES, type Barangay, type Beneficiary, type ProfileUpdate, type BeneficiaryDocument, type DocumentType, type ClaimPass as ClaimPassData } from '../api';
 import {
   formatDate,
   formatDateTime,
@@ -78,7 +78,7 @@ export function DetailScreen() {
       content: <NotificationDetails />,
     },
     'reset-password': {
-      title: t('Reset password', 'Ireset ang password'),
+      title: t('Recover account', 'Irecover ang account'),
       content: <Recovery />,
       active: 'profile',
     },
@@ -140,10 +140,10 @@ export function DetailScreen() {
     );
   return (
     <View style={{ flex: 1 }}>
-      <Page tabs title={entry.title}>
+      <Page tabs={screen !== 'reset-password'} title={entry.title}>
         {entry.content}
       </Page>
-      <BottomLinks active={entry.active} />
+      {screen !== 'reset-password' && <BottomLinks active={entry.active} />}
     </View>
   );
 }
@@ -659,10 +659,13 @@ function NotificationDetails() {
 }
 
 function Recovery() {
-  const { phone, t } = useDemo();
+  const { phone, setPhone, t } = useDemo();
   const [value, setValue] = useState(phone);
   const [error, setError] = useState('');
-  const [sent, setSent] = useState(false);
+  const [sending, setSending] = useState(false);
+  const busy = useRef(false);
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   return (
     <>
       <View style={{ alignItems: 'center', gap: 12, paddingVertical: 12 }}>
@@ -682,23 +685,20 @@ function Recovery() {
         onChangeText={(s) => {
           setValue(s);
           setError('');
-          setSent(false);
         }}
         error={error}
+        editable={!sending}
       />
       <Notice>
-        {sent
-          ? t(
-              'Preview only: your request was validated. No recovery code was sent.',
-              'Preview lamang: naverify ang request. Walay recovery code gipadala.',
-            )
-          : t(
-              'When connected, a 6-digit verification code will be sent to your registered contact.',
-              'Kon konektado na, ipadala ang 6 ka numero nga code sa imong rehistradong numero.',
-            )}
+        {t(
+          'Verify access to your registered number with a six-digit code. If you no longer have that number, contact your barangay facilitator.',
+          'I-verify ang imong rehistradong numero gamit ang unom ka numero nga code. Kon wala na nimo ang numero, kontaka ang imong barangay facilitator.',
+        )}
       </Notice>
       <Button
-        onPress={() => {
+        loading={sending}
+        onPress={async () => {
+          if (busy.current) return;
           if (!/^9\d{9}$/.test(value)) {
             setError(
               t(
@@ -708,7 +708,21 @@ function Recovery() {
             );
             return;
           }
-          setSent(true);
+          busy.current = true;
+          setSending(true);
+          setError('');
+          try {
+            const result = await requestOtp(value, 'login');
+            if (!active.current) return;
+            setPhone(value);
+            flow('otp', { intent: 'login', ...(result.developmentOtp ? { developmentOtp: result.developmentOtp } : {}) });
+          } catch (caught) {
+            if (active.current) setError(caught instanceof ApiRequestError ? caught.message
+              : t('Could not request a code. Try again.', 'Wala makahangyo og code. Sulayi pag-usab.'));
+          } finally {
+            busy.current = false;
+            if (active.current) setSending(false);
+          }
         }}
       >
         {t('Send verification code', 'Ipadala ang verification code')}
@@ -716,12 +730,6 @@ function Recovery() {
       <Button variant="outline" onPress={() => router.replace('/flow/login')}>
         {t('Back to login', 'Balik sa login')}
       </Button>
-      <Txt variant="small" style={{ textAlign: 'center' }}>
-        {t(
-          'Account recovery requires the authentication backend.',
-          'Kinahanglan ang authentication backend aron marecover ang account.',
-        )}
-      </Txt>
     </>
   );
 }

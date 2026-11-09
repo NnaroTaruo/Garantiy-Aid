@@ -22,6 +22,8 @@ Phase 6 adds [mobile-notifications.patch](../../integrations/shared-backend/mobi
 
 For version 4.0, use a clean checkout of backend `42b4552`, then run:
 
+Phase 7 prepares [mobile-sms.patch](../../integrations/shared-backend/mobile-sms.patch) after the notification patch. It adds opt-in Semaphore verification texts with delivery/mode safeguards and connects the mobile Recover account screen to the existing login-code flow. The team has no provider account yet, so real SMS remains inactive and unvalidated; local configuration stays DEVELOPMENT. See [SMS setup](sms-setup.md) and the included `docs/mobile-sms-integration.md`. This patch adds challenge-delivery and session-mode fields and preserves existing development data. No password system or lost-number account linking is introduced.
+
 ```powershell
 git switch -c feat/mobile-beneficiary-auth 42b4552
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-v4.patch
@@ -30,6 +32,8 @@ git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-back
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-claims.patch
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-notifications.patch
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-notifications.patch
+git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-sms.patch
+git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-sms.patch
 npm ci
 npx prisma generate
 npx prisma migrate deploy
@@ -93,9 +97,11 @@ For QR, open Schedule > Open my QR claim pass after staff publish an eligible QR
 
 Version 4 also supports QR_OR_BIOMETRIC: QR alone can complete verification for that explicitly configured requirement. New physical-assistance events require package name, unit and quantity before opening. Staff-removed documents disappear from the mobile list and cannot be downloaded or reused by duplicate upload matching; corrections retain a named Other requirement. Selecting individual named Other requirements in the mobile form remains later work. The user manually confirmed enrollment approval, published scheduling and mobile QR display, then created the fresh LOCAL TEST - Mobile QR Test 2 event for November 10. Administrator manual entry successfully verified its mobile-issued credential; mobile refresh hid the used QR and staff rejected reuse. The facilitator then recorded a clearly labelled simulated release of one test food pack with LOCAL-TEST-RELEASE-001 evidence and issued its receipt. Exactly one claim is now CLAIMED with one saved receipt snapshot, facilitator/timestamp/package attribution and no wallet transactions; no actual goods or money moved. Camera verification, receipt printing and its verification QR remain untested; the old November 7 event is a separate expired test.
 
-The mobile API uses multipart only for the shared `/api/v1/mobile` base. Its original local backend keeps raw-byte uploads and received status. Staff can review mobile uploads because both use the same table; uploaded_by_beneficiary records the real uploader without fabricating a staff account. File contents remain private; file-viewing UI, real SMS/push and preferences, transfer history, recovery, and a general program catalog are later work. Those unintegrated features still show request errors under the shared prefix. Existing staff records need a separate authorized mobile-linking workflow.
+The mobile API uses multipart only for the shared `/api/v1/mobile` base. Its original local backend keeps raw-byte uploads and received status. Staff can review mobile uploads because both use the same table; uploaded_by_beneficiary records the real uploader without fabricating a staff account. File contents remain private; file-viewing UI, live SMS activation, push/preferences, transfer history, lost-number linking, and a general program catalog are later work. Those unintegrated features still show request errors under the shared prefix. Existing staff records need a separate authorized mobile-linking workflow.
 
 ## Verified result
+
+Phase 7: 43 mobile regressions, TypeScript, the actual shared client/API suite, both explicit authentication/mocked-SMS database cases, four gateway tests, web/Android exports and five controlled Chrome views pass. Backend defaults report 414 passed, nine skipped and zero failed. Recovery covers validation, failure/retry, duplicate taps, late navigation and DEV/SMS replies. Gateway tests use interception only; no live texts or real carrier receipt are claimed. Both local databases have the additive SMS migration, while the private development mode/key remain unchanged. All four patches apply in sequence and reproduce the 10 phase-7 backend files. A provider account, sender/credits, real phone test and deployment remain external setup requirements.
 
 Phase 6: all 42 mobile regressions, TypeScript, the expanded actual client/API/database test, and all 409 default backend checks pass (eight explicit database cases remain skipped). The existing verification-time tests now assert one final-verification notification for completed combined methods and none while pending. Database coverage includes enrollment decisions, no draft alerts, publication, QR completion, release replay, simulated credit/reversal replay, DTO privacy, first-read concurrency, a later login, hidden deliveries, owner isolation and rollback. Simulated settlement uses synthetic biometric prerequisites; no face matching or real funds are exercised. The additive migration was applied to the isolated test database and the existing local development database. All three patches apply in order on a clean upstream checkout; 14 phase-6 files match the active implementation. New notification rows are created by future staff actions; existing historical events are not backfilled.
 

@@ -36,6 +36,8 @@ Phase 6 on November 9 connects shared in-app notifications and persistent read s
 
 ## Operating Context
 
+Phase 7 on November 10 connects the Recover account UI to the existing phone login/verification flow and prepares opt-in Semaphore SMS delivery. The team has no provider account, so local configuration remains DEVELOPMENT and live SMS is not validated. Codes are delivered after the database transaction commits, accepted before verification, invalidated on failed send and never exposed in SMS responses. Authentication mode binds challenges/sessions so development credentials cannot be used in SMS mode. The additive migration preserves existing demo data and credentials. Lost-number linking/reassignment, SMS activation, push/preferences, remaining record screens, live support, real biometrics and deployment remain later work. See mobile/docs/sms-setup.md for the external setup requirements.
+
 The manuscript proposes one REST backend shared by the mobile and web apps. The supplied ERD defines beneficiaries, schedules, QR tokens, claims, notifications, enrollment, documents, consent, wallet accounts, and transactions. The local shared integration now uses the staff backend's enrollment review, published scheduling, QR verification, release, simulated ledger and notification workflows. Teammate review and deployment of these mobile extensions to a shared hosted backend remain pending.
 
 ## Capabilities and Constraints

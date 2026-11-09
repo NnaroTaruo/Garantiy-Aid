@@ -1,0 +1,552 @@
+diff --git a/.env.example b/.env.example
+index f083b2d..295036d 100644
+--- a/.env.example
++++ b/.env.example
+@@ -11,10 +11,15 @@ JWT_ACCESS_SECRET=replace-with-at-least-64-random-characters
+ JWT_ACCESS_EXPIRES_IN=24h
+ JWT_ISSUER=garantiyaid-api
+ JWT_AUDIENCE=garantiyaid-staff
+-# Beneficiary OTP is opt-in and development-only until an SMS provider is implemented.
++# Beneficiary OTP is opt-in. DEVELOPMENT displays codes locally; SMS uses Semaphore.
+ MOBILE_AUTH_MODE=DISABLED
+ # Generate a separate secret: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+ # MOBILE_AUTH_SECRET=
++# SMS mode requires an activated Semaphore account, credits and an approved/default sender.
++# Store these only in the backend's private environment. Never use EXPO_PUBLIC_ for secrets.
++# MOBILE_SMS_SEMAPHORE_API_KEY=
++# MOBILE_SMS_SENDER_NAME=
++MOBILE_SMS_TIMEOUT_MS=8000
+ # Optional private document directory. Default: uploads/beneficiary-documents relative to the API working directory.
+ # DOCUMENT_STORAGE_DIR=
+ FIELD_ENCRYPTION_KEY=replace-with-exactly-64-hexadecimal-characters
+diff --git a/docs/mobile-sms-integration.md b/docs/mobile-sms-integration.md
+new file mode 100644
+index 0000000..b524722
+--- /dev/null
++++ b/docs/mobile-sms-integration.md
+@@ -0,0 +1,49 @@
++# Mobile SMS verification and account access (phase 7)
++
++Implemented locally on November 10, 2026. The team has no SMS provider account yet. The Semaphore adapter is implemented and tested with a mocked gateway; no real text, paid service, account signup or production deployment was performed. The local private environment remains DEVELOPMENT, with its existing secret and saved accounts.
++
++## Apply
++
++On backend `42b4552`, apply `mobile-v4.patch`, `mobile-claims.patch`, `mobile-notifications.patch`, then `mobile-sms.patch`. Generate Prisma and deploy migrations to a separate test/development database before starting the API. This phase adds OTP delivery mode/acceptance time and session authentication mode; earlier credentials are tagged DEVELOPMENT and existing development challenges retain their acceptance time. No dependency or Redis worker is added.
++
++## Activate SMS when the team is ready
++
++1. Set up the team's Semaphore account, API key, credit balance and registered default or approved sender name. Review the current [official API documentation](https://www.semaphore.co/docs) and provider account terms before buying credits. Sender approval and carrier delivery are external requirements.
++2. Keep the API key in the backend's private environment or hosted secret manager. Never put it in mobile code, an EXPO_PUBLIC variable, screenshots, Git or chat. Keep MOBILE_AUTH_SECRET private and stable; it also protects mobile session/QR operations.
++3. In a separate configured backend instance, set:
++
++   ```dotenv
++   MOBILE_AUTH_MODE=SMS
++   MOBILE_AUTH_SECRET=<existing-private-mobile-secret>
++   MOBILE_SMS_SEMAPHORE_API_KEY=<private-api-key>
++   # Optional: an approved sender, otherwise use the account's registered default.
++   MOBILE_SMS_SENDER_NAME=<approved-sender-name>
++   MOBILE_SMS_TIMEOUT_MS=8000
++   ```
++
++   Replace the placeholders privately. Omit the sender variable if using the registered default. The local demo can remain MOBILE_AUTH_MODE=DEVELOPMENT until the account is ready; DISABLED remains the template default. Production configuration must also satisfy the shared backend's normal HTTPS, secrets, CORS, storage and deployment requirements.
++4. Restart that API instance. Point mobile at it with the existing public API URL setting. Register a unique fictional test beneficiary using a real Philippine number you control. SMS mode returns expiry information, never a development code. A prior staff record still requires authorized linking; this feature does not link records automatically.
++5. Enter the received code. Test login, resend after 60 seconds, incorrect/expired codes, and recovery. Confirm a local phone number's receipt through the provider dashboard and the phone itself before claiming live delivery works.
++
++The adapter uses one fixed HTTPS Semaphore message endpoint and one normalized Philippine recipient. It preserves the generated six digits, including leading zeros, in a short message. No automatic provider retry or bulk send occurs. A gateway acceptance is not a carrier delivery guarantee. Provider requests are billable when activated; the prototype does not purchase credits or activate an account.
++
++## Authentication behavior
++
++Registration/challenge creation commits before the network request, so the gateway never holds a database lock. A pending SMS challenge cannot authenticate until its request is accepted. Timeout, malformed/failed gateway responses and acceptance-save failure invalidate the challenge and return a sanitized error. No raw gateway response, API key or OTP is logged, audited or returned in SMS mode. Only the HMAC of the code is stored. A failed initial send leaves one unverified account that can resume registration after the resend cooldown.
++
++Codes expire after five minutes, allow five incorrect attempts, have a one-minute resend cooldown and remain single-use under the existing account lock. Mode binding prevents DEVELOPMENT codes or sessions being used in SMS mode and vice versa. Switching modes requires signing in again. No secret or private .env is changed by this patch. Existing demo QR records, claims, wallet history, staff passwords and authenticators are not modified.
++
++## Recovery
++
++The mobile Recover account screen now requests a real login challenge and opens the existing OTP verification screen after the server confirms the request. Development codes are displayed only when explicitly returned by the development backend. It does not create a password, reset an identity, approve enrollment or create a session before code verification. People who no longer control the registered number are directed to the facilitator; a lost-number linking/reassignment workflow is separate work. Existing other sessions still follow their ordinary logout/expiry rules.
++
++Recovery disables repeated sends/phone edits while waiting, preserves failed input, supports retry, ignores responses after leaving, and uses EN/BS copy. The public recovery page omits signed-in navigation. Registration and code-request client timeouts allow 20 seconds for the configured gateway deadline plus database work. The original mobile backend remains compatible.
++
++## Checks
++
++- Mobile regressions, TypeScript and web/Android exports.
++- `node --test test/mobile-sms.test.js`: only mocked requests, including leading zero, sender handling, failed/malformed replies, timeout, no retry and sanitized errors.
++- With explicit DATABASE_URL for a separate migrated test instance and RUN_MOBILE_DB_TESTS=1: `node --test --test-concurrency=1 test/mobile-auth.integration.js test/mobile-sms.integration.js`. The SMS test intercepts all gateway requests and exercises pending delivery, successful issuance, hidden codes, registration retry, failed-send invalidation, cooldown, recovery/login, single use and mode separation.
++- From mobile, `npm.cmd run test:shared` covers the preceding shared account/document/schedule/QR/release/notification flows in DEVELOPMENT. Keep database suites sequential.
++
++Actual provider credentials, account credits/sender approval, receipt on a physical phone and hosted deployment remain required for live SMS validation.
+diff --git a/prisma/migrations/20261110000100_add_mobile_sms_delivery/migration.sql b/prisma/migrations/20261110000100_add_mobile_sms_delivery/migration.sql
+new file mode 100644
+index 0000000..df85a05
+--- /dev/null
++++ b/prisma/migrations/20261110000100_add_mobile_sms_delivery/migration.sql
+@@ -0,0 +1,10 @@
++-- Preserve development accounts while separating test credentials from SMS authentication.
++ALTER TABLE "beneficiary_mobile_otps"
++  ADD COLUMN "delivery_mode" VARCHAR(20) NOT NULL DEFAULT 'DEVELOPMENT',
++  ADD COLUMN "delivery_accepted_at" TIMESTAMPTZ(6);
++
++-- Earlier challenges were issued only in development mode.
++UPDATE "beneficiary_mobile_otps" SET "delivery_accepted_at" = "created_at";
++
++ALTER TABLE "beneficiary_mobile_sessions"
++  ADD COLUMN "auth_mode" VARCHAR(20) NOT NULL DEFAULT 'DEVELOPMENT';
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index fc12c14..4abcd52 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -531,6 +531,8 @@ model BeneficiaryMobileOtp {
+   accountId         String    @map("account_id") @db.Uuid
+   purpose           String    @db.VarChar(10)
+   codeHash          String    @map("code_hash") @db.Char(64)
++  deliveryMode      String    @default("DEVELOPMENT") @map("delivery_mode") @db.VarChar(20)
++  deliveryAcceptedAt DateTime? @map("delivery_accepted_at") @db.Timestamptz(6)
+   attemptsRemaining Int       @default(5) @map("attempts_remaining")
+   expiresAt         DateTime  @map("expires_at") @db.Timestamptz(6)
+   consumedAt        DateTime? @map("consumed_at") @db.Timestamptz(6)
+@@ -546,6 +548,7 @@ model BeneficiaryMobileSession {
+   sessionId String    @id @default(uuid()) @map("session_id") @db.Uuid
+   accountId String    @map("account_id") @db.Uuid
+   tokenHash String    @unique @map("token_hash") @db.Char(64)
++  authMode  String    @default("DEVELOPMENT") @map("auth_mode") @db.VarChar(20)
+   expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+   revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+diff --git a/src/config/env.js b/src/config/env.js
+index 97b2d50..6acb77c 100644
+--- a/src/config/env.js
++++ b/src/config/env.js
+@@ -30,8 +30,11 @@ const environmentSchema = z.object({
+   JWT_ACCESS_EXPIRES_IN: duration.default("15m"),
+   JWT_ISSUER: z.string().trim().min(3).max(100).default("garantiyaid-api"),
+   JWT_AUDIENCE: z.string().trim().min(3).max(100).default("garantiyaid-staff"),
+-  MOBILE_AUTH_MODE: z.enum(["DISABLED", "DEVELOPMENT"]).default("DISABLED"),
++  MOBILE_AUTH_MODE: z.enum(["DISABLED", "DEVELOPMENT", "SMS"]).default("DISABLED"),
+   MOBILE_AUTH_SECRET: optionalTrimmedString.pipe(z.string().min(32).optional()),
++  MOBILE_SMS_SEMAPHORE_API_KEY: optionalTrimmedString,
++  MOBILE_SMS_SENDER_NAME: optionalTrimmedString.pipe(z.string().max(11).optional()),
++  MOBILE_SMS_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(10_000).default(8_000),
+   DOCUMENT_STORAGE_DIR: optionalTrimmedString,
+   FIELD_ENCRYPTION_KEY: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
+@@ -92,6 +95,9 @@ const environmentSchema = z.object({
+   if (value.MOBILE_AUTH_MODE === "DEVELOPMENT" && (!value.MOBILE_AUTH_SECRET || value.NODE_ENV === "production")) {
+     context.addIssue({ code: "custom", path: ["MOBILE_AUTH_MODE"], message: "Development mobile OTP requires MOBILE_AUTH_SECRET and must not run in production. Real SMS delivery is not connected." });
+   }
++  if (value.MOBILE_AUTH_MODE === "SMS" && (!value.MOBILE_AUTH_SECRET || !value.MOBILE_SMS_SEMAPHORE_API_KEY)) {
++    context.addIssue({ code: "custom", path: ["MOBILE_AUTH_MODE"], message: "SMS authentication requires a private mobile auth secret and Semaphore API key." });
++  }
+   const origins = value.CORS_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean);
+ 
+   if (origins.length === 0 || origins.includes("*")) {
+@@ -234,6 +240,9 @@ export const env = {
+   jwtAudience: parsedEnvironment.data.JWT_AUDIENCE,
+   mobileAuthMode: parsedEnvironment.data.MOBILE_AUTH_MODE,
+   mobileAuthSecret: parsedEnvironment.data.MOBILE_AUTH_SECRET,
++  mobileSmsSemaphoreApiKey: parsedEnvironment.data.MOBILE_SMS_SEMAPHORE_API_KEY,
++  mobileSmsSenderName: parsedEnvironment.data.MOBILE_SMS_SENDER_NAME,
++  mobileSmsTimeoutMs: parsedEnvironment.data.MOBILE_SMS_TIMEOUT_MS,
+   documentStorageDir: parsedEnvironment.data.DOCUMENT_STORAGE_DIR,
+   fieldEncryptionKey: parsedEnvironment.data.FIELD_ENCRYPTION_KEY,
+   trustProxyHops: parsedEnvironment.data.TRUST_PROXY_HOPS,
+diff --git a/src/modules/mobile/mobile.service.js b/src/modules/mobile/mobile.service.js
+index cfdbeb8..9108873 100644
+--- a/src/modules/mobile/mobile.service.js
++++ b/src/modules/mobile/mobile.service.js
+@@ -2,14 +2,17 @@ import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from
+ import prisma from "../../lib/prisma.js";
+ import { env } from "../../config/env.js";
+ import { AppError } from "../../utils/AppError.js";
++import { sendMobileOtpSms } from "./mobileSms.service.js";
+ 
+ const OTP_LIFETIME_MS = 5 * 60_000;
+ const RESEND_WAIT_MS = 60_000;
+ const SESSION_LIFETIME_MS = 7 * 24 * 60 * 60_000;
+ 
+ function requireMobileAuth() {
+-  if (env.mobileAuthMode !== "DEVELOPMENT" || !env.mobileAuthSecret || env.nodeEnv === "production") {
+-    throw new AppError(503, "MOBILE_AUTH_UNAVAILABLE", "Beneficiary authentication is not enabled. Development OTP must be configured; real SMS delivery is not connected.");
++  if (!env.mobileAuthSecret || !["DEVELOPMENT", "SMS"].includes(env.mobileAuthMode)
++    || (env.mobileAuthMode === "DEVELOPMENT" && env.nodeEnv === "production")
++    || (env.mobileAuthMode === "SMS" && !env.mobileSmsSemaphoreApiKey)) {
++    throw new AppError(503, "MOBILE_AUTH_UNAVAILABLE", "Beneficiary authentication is not configured. Contact the system administrator.");
+   }
+ }
+ 
+@@ -66,16 +69,34 @@ async function createChallenge(database, accountId, purpose) {
+   const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+   await database.beneficiaryMobileOtp.create({ data: {
+     challengeId, accountId, purpose, codeHash: hashMobileSecret(`otp:${challengeId}:${code}`),
++    deliveryMode: env.mobileAuthMode, deliveryAcceptedAt: env.mobileAuthMode === "DEVELOPMENT" ? now : null,
+     expiresAt: new Date(now.getTime() + OTP_LIFETIME_MS),
+   } });
+-  // Explicit development mode only; never log the code or send it to an SMS queue.
+-  return { expiresInSeconds: OTP_LIFETIME_MS / 1000, developmentOtp: code };
++  return { challengeId, code };
++}
++
++async function deliverChallenge(contactNumber, challenge) {
++  const expiresInSeconds = OTP_LIFETIME_MS / 1000;
++  if (env.mobileAuthMode === "DEVELOPMENT") return { expiresInSeconds, developmentOtp: challenge.code };
++  try {
++    // Release the account/database lock before contacting the external gateway.
++    await sendMobileOtpSms(contactNumber, challenge.code);
++    const accepted = await prisma.beneficiaryMobileOtp.updateMany({
++      where: { challengeId: challenge.challengeId, deliveryMode: "SMS", consumedAt: null, expiresAt: { gt: new Date() } },
++      data: { deliveryAcceptedAt: new Date() },
++    });
++    if (accepted.count !== 1) throw new Error("OTP delivery changed concurrently");
++    return { expiresInSeconds };
++  } catch {
++    await prisma.beneficiaryMobileOtp.updateMany({ where: { challengeId: challenge.challengeId, consumedAt: null }, data: { consumedAt: new Date() } });
++    throw new AppError(503, "OTP_DELIVERY_FAILED", "The verification text could not be sent. Wait one minute, then request a new code.");
++  }
+ }
+ 
+ export async function registerMobile(input) {
+   requireMobileAuth();
+   try {
+-    return await prisma.$transaction(async (tx) => {
++    const registered = await prisma.$transaction(async (tx) => {
+       if (await tx.beneficiaryMobileAccount.findUnique({ where: { contactNumber: input.contactNumber } })) {
+         throw new AppError(409, "PHONE_ALREADY_REGISTERED", "This mobile number already has an account.");
+       }
+@@ -93,8 +114,10 @@ export async function registerMobile(input) {
+       }, include: { beneficiary: true } });
+       const otp = await createChallenge(tx, account.accountId, "register");
+       await audit(tx, account, "MOBILE_ACCOUNT_REGISTERED");
+-      return { beneficiary: mobileProfile(account), verificationRequired: true, ...otp };
++      return { beneficiary: mobileProfile(account), otp };
+     });
++    return { beneficiary: registered.beneficiary, verificationRequired: true,
++      ...await deliverChallenge(input.contactNumber, registered.otp) };
+   } catch (error) {
+     if (error.code === "P2002") throw new AppError(409, "PHONE_ALREADY_REGISTERED", "This mobile number already has an account.");
+     throw error;
+@@ -116,11 +139,12 @@ function assertPurpose(account, purpose) {
+ 
+ export async function requestMobileOtp({ contactNumber, purpose }) {
+   const { accountId } = await findAccount(contactNumber);
+-  return prisma.$transaction(async (tx) => {
++  const challenge = await prisma.$transaction(async (tx) => {
+     const account = await lockedAccount(tx, accountId);
+     assertPurpose(account, purpose);
+     return createChallenge(tx, accountId, purpose);
+   });
++  return deliverChallenge(contactNumber, challenge);
+ }
+ 
+ export async function verifyMobileOtp({ contactNumber, purpose, code }) {
+@@ -129,7 +153,8 @@ export async function verifyMobileOtp({ contactNumber, purpose, code }) {
+     const account = await lockedAccount(tx, accountId);
+     assertPurpose(account, purpose);
+     const challenge = await tx.beneficiaryMobileOtp.findFirst({ where: { accountId, purpose, consumedAt: null }, orderBy: { createdAt: "desc" } });
+-    if (!challenge || challenge.expiresAt <= new Date()) throw new AppError(400, "OTP_EXPIRED", "This code has expired. Request a new one.");
++    if (!challenge || challenge.expiresAt <= new Date() || challenge.deliveryMode !== env.mobileAuthMode) throw new AppError(400, "OTP_EXPIRED", "This code has expired. Request a new one.");
++    if (!challenge.deliveryAcceptedAt) throw new AppError(409, "OTP_NOT_READY", "Your code is still being prepared. Wait a moment and try again.");
+     if (challenge.attemptsRemaining <= 0) throw new AppError(429, "OTP_ATTEMPTS_EXCEEDED", "Request a new code and try again.");
+     const candidate = Buffer.from(hashMobileSecret(`otp:${challenge.challengeId}:${code}`), "hex");
+     const stored = Buffer.from(challenge.codeHash, "hex");
+@@ -143,7 +168,7 @@ export async function verifyMobileOtp({ contactNumber, purpose, code }) {
+     if (purpose === "register") account.verifiedAt = (await tx.beneficiaryMobileAccount.update({ where: { accountId }, data: { verifiedAt: now } })).verifiedAt;
+     const token = `gya_mobile_${randomBytes(32).toString("base64url")}`;
+     const expiresAt = new Date(now.getTime() + SESSION_LIFETIME_MS);
+-    await tx.beneficiaryMobileSession.create({ data: { accountId, tokenHash: hashMobileSecret(`session:${token}`), expiresAt } });
++    await tx.beneficiaryMobileSession.create({ data: { accountId, tokenHash: hashMobileSecret(`session:${token}`), authMode: env.mobileAuthMode, expiresAt } });
+     await audit(tx, account, "MOBILE_PHONE_AUTHENTICATED");
+     return { accessToken: token, tokenType: "Bearer", expiresAt: expiresAt.toISOString(), beneficiary: mobileProfile(account) };
+   });
+@@ -158,7 +183,7 @@ export async function authenticateMobile(authorization) {
+     where: { tokenHash: hashMobileSecret(`session:${match[1]}`) },
+     include: { account: { include: { beneficiary: true } } },
+   });
+-  if (!session || session.revokedAt || session.expiresAt <= new Date() || !session.account.verifiedAt || session.account.beneficiary.status !== "ACTIVE") {
++  if (!session || session.authMode !== env.mobileAuthMode || session.revokedAt || session.expiresAt <= new Date() || !session.account.verifiedAt || session.account.beneficiary.status !== "ACTIVE") {
+     throw new AppError(401, "SESSION_EXPIRED", "Your beneficiary session has expired or the account is inactive. Sign in again.");
+   }
+   return session;
+@@ -177,7 +202,7 @@ export async function updateMobileProfile(session, input) {
+ export async function lockMobileSession(database, session) {
+   const account = await lockedAccount(database, session.accountId);
+   const current = await database.beneficiaryMobileSession.findUnique({ where: { sessionId: session.sessionId } });
+-  if (!current || current.revokedAt || current.expiresAt <= new Date() || !account.verifiedAt || account.beneficiary.status !== "ACTIVE") {
++  if (!current || current.authMode !== env.mobileAuthMode || current.revokedAt || current.expiresAt <= new Date() || !account.verifiedAt || account.beneficiary.status !== "ACTIVE") {
+     throw new AppError(401, "SESSION_EXPIRED", "Sign in again before saving.");
+   }
+   return account;
+diff --git a/src/modules/mobile/mobileSms.service.js b/src/modules/mobile/mobileSms.service.js
+new file mode 100644
+index 0000000..11d25aa
+--- /dev/null
++++ b/src/modules/mobile/mobileSms.service.js
+@@ -0,0 +1,29 @@
++import { env } from "../../config/env.js";
++import { AppError } from "../../utils/AppError.js";
++
++export async function sendMobileOtpSms(contactNumber, code) {
++  if (env.mobileAuthMode !== "SMS" || !env.mobileSmsSemaphoreApiKey) {
++    throw new AppError(503, "MOBILE_AUTH_UNAVAILABLE", "SMS verification is not configured.");
++  }
++  if (!/^\+639\d{9}$/.test(contactNumber) || !/^\d{6}$/.test(code)) throw new Error("Invalid internal OTP delivery request");
++  const number = contactNumber.slice(1);
++  const message = `GarantiyAid verification code: ${code}. Expires in 5 minutes. Keep this code private.`;
++  const body = new URLSearchParams({ apikey: env.mobileSmsSemaphoreApiKey, number, message });
++  if (env.mobileSmsSenderName) body.set("sendername", env.mobileSmsSenderName);
++  try {
++    const response = await fetch("https://api.semaphore.co/api/v4/messages", {
++      method: "POST", body, redirect: "error", signal: AbortSignal.timeout(env.mobileSmsTimeoutMs),
++      headers: { "Content-Type": "application/x-www-form-urlencoded" },
++    });
++    if (!response.ok) throw new Error("SMS gateway rejected request");
++    const result = await response.json();
++    const entry = Array.isArray(result) && result.length === 1 ? result[0] : null;
++    if (!entry?.message_id || !["queued", "pending", "sent"].includes(String(entry.status).toLowerCase())
++      || String(entry.recipient).replace(/^\+/, "") !== number || !String(entry.message).includes(code)) {
++      throw new Error("SMS gateway did not accept the code");
++    }
++    // The gateway response includes the raw code and recipient; never return or log it.
++  } catch {
++    throw new AppError(503, "OTP_DELIVERY_FAILED", "The verification text could not be sent. Wait one minute, then request a new code.");
++  }
++}
+diff --git a/test/mobile-sms.integration.js b/test/mobile-sms.integration.js
+new file mode 100644
+index 0000000..f116458
+--- /dev/null
++++ b/test/mobile-sms.integration.js
+@@ -0,0 +1,117 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { randomInt, randomUUID } from "node:crypto";
++import { once } from "node:events";
++
++test("SMS auth hides codes, confirms gateway acceptance, invalidates failed deliveries and separates development credentials", {
++  skip: process.env.RUN_MOBILE_DB_TESTS !== "1",
++}, async () => {
++  assert.ok(process.env.DATABASE_URL, "Explicitly select a separate migrated test database.");
++  process.env.AUTH_RATE_LIMIT_PER_15_MINUTES = "100";
++  const [{ default: app }, { default: prisma }, { env }] = await Promise.all([
++    import("../src/app.js"), import("../src/lib/prisma.js"), import("../src/config/env.js"),
++  ]);
++  const savedMode = env.mobileAuthMode, savedKey = env.mobileSmsSemaphoreApiKey;
++  const nativeFetch = globalThis.fetch;
++  env.mobileAuthMode = "SMS"; env.mobileSmsSemaphoreApiKey = "synthetic-sms-key-only";
++  const server = app.listen(0, "127.0.0.1");
++  await once(server, "listening");
++  const base = `http://127.0.0.1:${server.address().port}/api/v1/mobile`;
++  const request = (route, body, token) => nativeFetch(base + route, { method: body ? "POST" : "GET",
++    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
++    ...(body ? { body: JSON.stringify(body) } : {}) });
++  const barangayId = randomUUID(), owners = [];
++  const phone = () => `+639${randomInt(100_000_000, 1_000_000_000)}`;
++  let scenario = "hold", release, started;
++  const reachedGateway = new Promise(resolve => { started = resolve; });
++  const held = new Promise(resolve => { release = resolve; });
++  const delivered = [];
++  globalThis.fetch = async (url, options) => {
++    assert.equal(url, "https://api.semaphore.co/api/v4/messages", "No unmocked SMS network request is permitted");
++    const code = options.body.get("message").match(/code: (\d{6})\./)[1];
++    delivered.push({ code, number: options.body.get("number") });
++    started();
++    if (scenario === "hold") await held;
++    if (scenario === "failure") throw new Error("Synthetic private provider failure");
++    return Response.json([{ message_id: delivered.length, recipient: options.body.get("number"),
++      message: options.body.get("message"), status: "Queued" }]);
++  };
++  const coolDown = accountId => prisma.beneficiaryMobileOtp.updateMany({ where: { accountId }, data: { createdAt: new Date(Date.now() - 61_000) } });
++  try {
++    await prisma.barangay.create({ data: { barangayId, barangayCode: barangayId.slice(0, 20), barangayName: "Synthetic SMS auth test", city: "Test", province: "Test" } });
++    const input = { firstName: "Synthetic", lastName: "SMS", middleName: "", birthDate: "1990-01-01", sex: "female", address: "Synthetic SMS test address", barangayId, contactNumber: phone() };
++    const registering = request("/auth/register", input);
++    await reachedGateway;
++    const pending = await prisma.beneficiaryMobileAccount.findUniqueOrThrow({ where: { contactNumber: input.contactNumber } });
++    owners.push(pending.beneficiaryId);
++    const challenge = await prisma.beneficiaryMobileOtp.findFirstOrThrow({ where: { accountId: pending.accountId } });
++    assert.equal(challenge.deliveryMode, "SMS");
++    assert.equal(challenge.deliveryAcceptedAt, null);
++    assert.notEqual(challenge.codeHash, delivered[0].code);
++    const premature = await request("/auth/otp/verify", { contactNumber: input.contactNumber, purpose: "register", code: delivered[0].code });
++    assert.equal(premature.status, 409);
++    assert.equal((await premature.json()).error.code, "OTP_NOT_READY");
++    release(); scenario = "success";
++    const registration = await registering;
++    assert.equal(registration.status, 201);
++    const registered = (await registration.json()).data;
++    assert.deepEqual(Object.keys(registered).sort(), ["beneficiary", "expiresInSeconds", "verificationRequired"]);
++    const verified = await request("/auth/otp/verify", { contactNumber: input.contactNumber, purpose: "register", code: delivered[0].code });
++    assert.equal(verified.status, 200);
++    const session = (await verified.json()).data;
++    assert.equal(session.beneficiary.isVerified, false);
++    assert.equal(session.beneficiary.phoneVerified, true);
++    assert.equal((await prisma.beneficiaryMobileSession.findFirstOrThrow({ where: { accountId: pending.accountId } })).authMode, "SMS");
++    env.mobileAuthMode = "DEVELOPMENT";
++    assert.equal((await request("/beneficiaries/me", null, session.accessToken)).status, 401);
++    await coolDown(pending.accountId);
++    const development = (await (await request("/auth/otp/request", { contactNumber: input.contactNumber, purpose: "login" })).json()).data;
++    assert.match(development.developmentOtp, /^\d{6}$/);
++    env.mobileAuthMode = "SMS";
++    const wrongMode = await request("/auth/otp/verify", { contactNumber: input.contactNumber, purpose: "login", code: development.developmentOtp });
++    assert.equal(wrongMode.status, 400);
++    env.mobileAuthMode = "DEVELOPMENT";
++    const devLogin = (await (await request("/auth/otp/verify", { contactNumber: input.contactNumber, purpose: "login", code: development.developmentOtp })).json()).data;
++    env.mobileAuthMode = "SMS";
++    assert.equal((await request("/beneficiaries/me", null, devLogin.accessToken)).status, 401);
++    assert.equal((await request("/beneficiaries/me", null, session.accessToken)).status, 200);
++    await coolDown(pending.accountId);
++    scenario = "failure";
++    const failed = await request("/auth/otp/request", { contactNumber: input.contactNumber, purpose: "login" });
++    assert.equal(failed.status, 503);
++    assert.equal((await failed.json()).error.code, "OTP_DELIVERY_FAILED");
++    const failedChallenge = await prisma.beneficiaryMobileOtp.findFirstOrThrow({ where: { accountId: pending.accountId }, orderBy: { createdAt: "desc" } });
++    assert.ok(failedChallenge.consumedAt);
++    assert.equal(failedChallenge.deliveryAcceptedAt, null);
++    assert.equal((await request("/auth/otp/verify", { contactNumber: input.contactNumber, purpose: "login", code: delivered.at(-1).code })).status, 400);
++    assert.equal((await request("/auth/otp/request", { contactNumber: input.contactNumber, purpose: "login" })).status, 429);
++    await coolDown(pending.accountId);
++    scenario = "success";
++    const retry = await request("/auth/otp/request", { contactNumber: input.contactNumber, purpose: "login" });
++    assert.equal(retry.status, 202);
++    assert.deepEqual(Object.keys((await retry.json()).data), ["expiresInSeconds"]);
++    const recovered = await request("/auth/otp/verify", { contactNumber: input.contactNumber, purpose: "login", code: delivered.at(-1).code });
++    assert.equal(recovered.status, 200);
++    assert.equal((await recovered.json()).data.beneficiary.id, pending.beneficiaryId);
++    assert.equal((await request("/auth/otp/verify", { contactNumber: input.contactNumber, purpose: "login", code: delivered.at(-1).code })).status, 400);
++    scenario = "failure";
++    const second = { ...input, lastName: "Retry", contactNumber: phone() };
++    assert.equal((await request("/auth/register", second)).status, 503);
++    const unfinished = await prisma.beneficiaryMobileAccount.findUniqueOrThrow({ where: { contactNumber: second.contactNumber } });
++    owners.push(unfinished.beneficiaryId);
++    assert.equal(unfinished.verifiedAt, null);
++    await coolDown(unfinished.accountId);
++    scenario = "success";
++    assert.equal((await request("/auth/otp/request", { contactNumber: second.contactNumber, purpose: "register" })).status, 202);
++    assert.equal((await request("/auth/otp/verify", { contactNumber: second.contactNumber, purpose: "register", code: delivered.at(-1).code })).status, 200);
++    assert.equal(await prisma.beneficiary.count({ where: { beneficiaryId: { in: owners } } }), 2);
++  } finally {
++    release();
++    globalThis.fetch = nativeFetch; env.mobileAuthMode = savedMode; env.mobileSmsSemaphoreApiKey = savedKey;
++    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
++    await prisma.auditLog.deleteMany({ where: { actorType: "BENEFICIARY", recordId: { in: owners } } });
++    await prisma.beneficiary.deleteMany({ where: { beneficiaryId: { in: owners } } });
++    await prisma.barangay.deleteMany({ where: { barangayId } });
++    await prisma.$disconnect();
++  }
++});
+diff --git a/test/mobile-sms.test.js b/test/mobile-sms.test.js
+new file mode 100644
+index 0000000..8d852ac
+--- /dev/null
++++ b/test/mobile-sms.test.js
+@@ -0,0 +1,79 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { env } from "../src/config/env.js";
++import { sendMobileOtpSms } from "../src/modules/mobile/mobileSms.service.js";
++
++const phone = "+639171234567", code = "001234";
++async function withGateway(run) {
++  const originalFetch = globalThis.fetch;
++  const saved = { mode: env.mobileAuthMode, key: env.mobileSmsSemaphoreApiKey, sender: env.mobileSmsSenderName, timeout: env.mobileSmsTimeoutMs };
++  env.mobileAuthMode = "SMS"; env.mobileSmsSemaphoreApiKey = "synthetic-sms-key-only";
++  env.mobileSmsSenderName = undefined; env.mobileSmsTimeoutMs = 1000;
++  try { await run(); } finally {
++    globalThis.fetch = originalFetch;
++    env.mobileAuthMode = saved.mode; env.mobileSmsSemaphoreApiKey = saved.key;
++    env.mobileSmsSenderName = saved.sender; env.mobileSmsTimeoutMs = saved.timeout;
++  }
++}
++const accepted = body => ({ message_id: 123, recipient: body.get("number"), message: body.get("message"), status: "Pending" });
++
++test("SMS delivery uses one HTTPS recipient, a short private code and the account's configured sender", () => withGateway(async () => {
++  let calls = 0;
++  globalThis.fetch = async (url, options) => {
++    calls++;
++    assert.equal(url, "https://api.semaphore.co/api/v4/messages");
++    assert.equal(options.redirect, "error");
++    assert.equal(options.method, "POST");
++    assert.equal(options.body.get("number"), phone.slice(1));
++    assert.equal(options.body.get("apikey"), env.mobileSmsSemaphoreApiKey);
++    assert.ok(options.body.get("message").includes(code));
++    assert.ok(options.body.get("message").length <= 160);
++    assert.equal(options.body.has("sendername"), calls !== 1);
++    return Response.json([accepted(options.body)]);
++  };
++  assert.equal(await sendMobileOtpSms(phone, code), undefined, "Do not return the raw gateway response");
++  env.mobileSmsSenderName = "Approved";
++  await sendMobileOtpSms(phone, code);
++  assert.equal(calls, 2);
++}));
++
++test("SMS failures, malformed replies and wrong recipients return a sanitized delivery error without retry", () => withGateway(async () => {
++  for (const scenario of ["http", "network", "json", "empty", "failed", "refunded", "foreign", "missing-code"]) {
++    let calls = 0;
++    globalThis.fetch = async (_url, options) => {
++      calls++;
++      if (scenario === "network") throw new Error(`Private ${code} ${env.mobileSmsSemaphoreApiKey}`);
++      if (scenario === "http") return Response.json({ private: code }, { status: 429 });
++      if (scenario === "json") return new Response("not json");
++      const row = accepted(options.body);
++      if (["failed", "refunded"].includes(scenario)) row.status = scenario;
++      if (scenario === "foreign") row.recipient = "639999999999";
++      if (scenario === "missing-code") row.message = "Unexpected message";
++      return Response.json(scenario === "empty" ? [] : [row]);
++    };
++    await assert.rejects(sendMobileOtpSms(phone, code), error => error.code === "OTP_DELIVERY_FAILED"
++      && error.statusCode === 503 && !error.message.includes(code) && !error.message.includes(env.mobileSmsSemaphoreApiKey));
++    assert.equal(calls, 1);
++  }
++}));
++
++test("SMS refuses disabled/unconfigured modes and malformed internal recipient/code values", () => withGateway(async () => {
++  globalThis.fetch = () => { throw new Error("Must not contact a gateway"); };
++  env.mobileAuthMode = "DEVELOPMENT";
++  await assert.rejects(sendMobileOtpSms(phone, code), { code: "MOBILE_AUTH_UNAVAILABLE" });
++  env.mobileAuthMode = "SMS"; env.mobileSmsSemaphoreApiKey = undefined;
++  await assert.rejects(sendMobileOtpSms(phone, code), { code: "MOBILE_AUTH_UNAVAILABLE" });
++  env.mobileSmsSemaphoreApiKey = "synthetic-sms-key-only";
++  for (const [recipient, value] of [[phone + ",639999999999", code], [phone, "abc123"], ["+14155552671", code]]) {
++    await assert.rejects(sendMobileOtpSms(recipient, value), /Invalid internal OTP/);
++  }
++}));
++
++test("SMS requests abort at their configured deadline", () => withGateway(async () => {
++  env.mobileSmsTimeoutMs = 5;
++  globalThis.fetch = async (_url, options) => new Promise((_resolve, reject) => {
++    const timer = setTimeout(() => reject(new Error("Deadline was not applied")), 100);
++    options.signal.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal.reason); }, { once: true });
++  });
++  await assert.rejects(sendMobileOtpSms(phone, code), { code: "OTP_DELIVERY_FAILED" });
++}));
+diff --git a/test/mobile.configuration.test.js b/test/mobile.configuration.test.js
+index 133306d..b45511e 100644
+--- a/test/mobile.configuration.test.js
++++ b/test/mobile.configuration.test.js
+@@ -23,3 +23,29 @@ test("disabled mobile authentication fails closed without exposing a development
+     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+   }
+ });
++
++test("production development-mode and incomplete SMS configuration fail closed", async () => {
++  const saved = { mode: env.mobileAuthMode, node: env.nodeEnv, key: env.mobileSmsSemaphoreApiKey, secret: env.mobileAuthSecret };
++  const server = app.listen(0, "127.0.0.1");
++  await once(server, "listening");
++  try {
++    for (const scenario of ["production-development", "missing-sms-key", "missing-auth-secret"]) {
++      env.mobileAuthMode = scenario === "production-development" ? "DEVELOPMENT" : "SMS";
++      env.nodeEnv = scenario === "production-development" ? "production" : "test";
++      env.mobileSmsSemaphoreApiKey = scenario === "missing-sms-key" ? undefined : "synthetic-sms-key-only";
++      env.mobileAuthSecret = scenario === "missing-auth-secret" ? undefined : "synthetic-auth-key-only-32-characters";
++      const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/mobile/auth/otp/request`, {
++        method: "POST", headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ contactNumber: "09171234567", purpose: "login" }),
++      });
++      assert.equal(response.status, 503);
++      const payload = await response.json();
++      assert.equal(payload.error.code, "MOBILE_AUTH_UNAVAILABLE");
++      assert.equal("developmentOtp" in (payload.data ?? {}), false);
++    }
++  } finally {
++    env.mobileAuthMode = saved.mode; env.nodeEnv = saved.node;
++    env.mobileSmsSemaphoreApiKey = saved.key; env.mobileAuthSecret = saved.secret;
++    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
++  }
++});

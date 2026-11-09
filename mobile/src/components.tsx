@@ -334,10 +334,12 @@ export function PhoneField({
   value,
   onChangeText,
   error,
+  editable = true,
 }: {
   value: string;
   onChangeText: (s: string) => void;
   error?: string;
+  editable?: boolean;
 }) {
   const { t } = useDemo();
   return (
@@ -350,6 +352,7 @@ export function PhoneField({
         <TextInput
           accessibilityLabel={t('Mobile number', 'Numero sa cellphone')}
           autoComplete="tel-national"
+          editable={editable}
           textContentType="telephoneNumber"
           keyboardType="phone-pad"
           value={value}
