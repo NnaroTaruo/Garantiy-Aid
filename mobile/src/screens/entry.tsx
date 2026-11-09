@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Image,
   Linking,
   Platform,
   Pressable,
@@ -9,14 +8,12 @@ import {
   View,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { BiometricConsentScreen, BiometricEnrollmentScreen } from './biometrics';
 import { StatusBar } from 'expo-status-bar';
 import {
   ArrowLeft,
   CalendarDays,
-  Camera,
   Check,
-  CircleCheck,
   ContactRound,
   MapPin,
   ScanFace,
@@ -924,282 +921,10 @@ function OTP() {
   );
 }
 
-function Consent() {
-  const { setConsentGiven, t } = useDemo();
-  return (
-    <Page
-      footer={
-        <>
-          <Button
-            onPress={() => {
-              setConsentGiven(true);
-              flow('capture');
-            }}
-          >
-            {t('I agree — Enroll my face', 'Mouyon ko — Ienroll akong nawong')}
-          </Button>
-          <Button
-            variant="outline"
-            onPress={() => {
-              setConsentGiven(false);
-              router.replace('/(tabs)/home');
-            }}
-          >
-            {t('Skip for now', 'Laktawi sa pagkakaron')}
-          </Button>
-        </>
-      }
-    >
-      <View style={{ alignItems: 'center', gap: 16 }}>
-        <Logo size={48} halo />
-        <Txt variant="title" style={{ textAlign: 'center' }}>
-          {t('Set up face verification', 'Iset up ang face verification')}
-        </Txt>
-        <Txt style={s.centerMuted}>
-          {t(
-            'This is optional. You can skip and use your phone number instead.',
-            'Opsyonal kini. Pwede nimo laktawan ug gamiton ang imong numero.',
-          )}
-        </Txt>
-      </View>
-      <Card>
-        <View style={styles.row}>
-          <ShieldCheck size={19} color={c.primary} />
-          <Txt variant="small" style={{ flex: 1, color: c.primary }}>
-            {t(
-              'Before you allow camera access, please review:',
-              'Sa dili pa tugotan ang camera, palihog basaha:',
-            )}
-          </Txt>
-        </View>
-        {[
-          t(
-            'Face capture is used only for identity verification.',
-            'Ang hulagway sa nawong alang lamang sa pagverify.',
-          ),
-          t(
-            'This preview does not upload or save your photo to a server.',
-            'Kini nga preview dili mo-upload o mosave sa hulagway sa server.',
-          ),
-          t(
-            'You can withdraw consent in Security & Privacy.',
-            'Pwede bawion ang pagtugot sa Security & Privacy.',
-          ),
-          t(
-            'Server-side matching and liveness are not connected yet.',
-            'Wala pa makonektar ang face matching ug liveness sa server.',
-          ),
-        ].map((text) => (
-          <View key={text} style={[styles.row, { alignItems: 'flex-start' }]}>
-            <CircleCheck size={17} color={c.green} />
-            <Txt variant="small" style={{ flex: 1 }}>
-              {text}
-            </Txt>
-          </View>
-        ))}
-      </Card>
-    </Page>
-  );
-}
+function Consent() { return <BiometricConsentScreen />; }
 
-function Capture() {
-  const { consentGiven, setFaceEnrolled, t } = useDemo();
-  const [permission, requestPermission] = useCameraPermissions();
-  const camera = useRef<CameraView>(null);
-  const [photo, setPhoto] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [cameraReady, setCameraReady] = useState(false);
-  const complete = () => {
-    setFaceEnrolled(true);
-    router.replace('/flow/face-success');
-  };
-  const take = async () => {
-    if (!camera.current || busy || !cameraReady) return;
-    setBusy(true);
-    try {
-      const result = await camera.current.takePictureAsync({ quality: 0.5 });
-      if (result) setPhoto(result.uri);
-    } catch {
-      setError(
-        t(
-          'Could not capture a photo. Check the camera and try again.',
-          'Dili makakuha og hulagway. Susihon ang camera ug sulayi pag-usab.',
-        ),
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-  if (!consentGiven)
-    return (
-      <Page title={t('Face enrollment', 'Face enrollment')}>
-        <Notice tone="warning">
-          {t(
-            'Please review the consent notice before using the camera.',
-            'Basaha una ang pagtugot sa dili pa gamiton ang camera.',
-          )}
-        </Notice>
-        <Button onPress={() => router.replace('/flow/consent')}>
-          {t('Review consent', 'Basaha ang pagtugot')}
-        </Button>
-      </Page>
-    );
-  return (
-    <Page
-      style={{ backgroundColor: c.navy }}
-      header={false}
-      footer={
-        <View style={{ gap: 12 }}>
-          {error ? <Notice tone="error">{error}</Notice> : null}
-          {photo ? (
-            <>
-              <Button variant="green" onPress={complete}>
-                {t('Use photo in preview', 'Gamita ang hulagway sa preview')}
-              </Button>
-              <Button
-                variant="white"
-                onPress={() => {
-                  setPhoto(null);
-                  setCameraReady(false);
-                }}
-              >
-                {t('Retake photo', 'Kuhaa pag-usab')}
-              </Button>
-            </>
-          ) : permission?.granted ? (
-            <Button icon={Camera} disabled={!cameraReady} loading={busy} onPress={take}>
-              {t('Capture photo', 'Kuhaa ang hulagway')}
-            </Button>
-          ) : (
-            <Button
-              icon={Camera}
-              onPress={() => {
-                if (permission && !permission.canAskAgain && Platform.OS !== 'web') {
-                  Linking.openSettings();
-                  return;
-                }
-                requestPermission().catch(() =>
-                  setError(
-                    t(
-                      'Camera access is unavailable. You can continue with the preview.',
-                      'Dili maablihan ang camera. Pwede mopadayon sa preview.',
-                    ),
-                  ),
-                );
-              }}
-            >
-              {t('Enable camera', 'Tugoti ang camera')}
-            </Button>
-          )}
-          {!photo && (
-            <Button variant="white" onPress={complete}>
-              {t('Continue with demo capture', 'Padayon sa demo capture')}
-            </Button>
-          )}
-          <Txt variant="small" style={{ textAlign: 'center', color: '#CED9E6' }}>
-            {t(
-              'Preview only. No face matching, liveness check, or upload occurs.',
-              'Preview lamang. Walay face matching, liveness, o upload.',
-            )}
-          </Txt>
-        </View>
-      }
-    >
-      <StatusBar style="light" />
-      <View style={[styles.row, { justifyContent: 'space-between' }]}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t('Go back', 'Balik')}
-          onPress={() => router.back()}
-          style={[styles.iconButton, { backgroundColor: c.card }]}
-        >
-          <ArrowLeft size={20} color={c.text} />
-        </Pressable>
-        <LanguageToggle />
-      </View>
-      <Txt variant="heading" style={{ color: c.card, textAlign: 'center' }}>
-        {t('Position your face', 'Iposisyon imong nawong')}
-      </Txt>
-      <View style={s.cameraBox}>
-        {photo ? (
-          <Image
-            source={{ uri: photo }}
-            style={StyleSheet.absoluteFill}
-            accessibilityLabel="Local face photo preview"
-          />
-        ) : permission?.granted ? (
-          <CameraView
-            ref={camera}
-            style={StyleSheet.absoluteFill}
-            facing="front"
-            onCameraReady={() => setCameraReady(true)}
-            onMountError={() => {
-              setError(
-                t(
-                  'Camera could not start. Try another device or use demo capture.',
-                  'Dili mosugod ang camera. Sulayi laing device o demo capture.',
-                ),
-              );
-              setCameraReady(false);
-            }}
-          />
-        ) : (
-          <ScanFace size={110} strokeWidth={1} color="#6282A8" />
-        )}
-        {!photo && <View pointerEvents="none" style={s.faceGuide} />}
-      </View>
-      {[
-        t('Look straight at the camera', 'Tan-aw diretso sa camera'),
-        t('Stay in good lighting', 'Pabilin sa hayag nga lugar'),
-        t('Hold still for a moment', 'Ayaw lihok kadiyot'),
-      ].map((text, index) => (
-        <View key={text} style={styles.row}>
-          <View style={s.tipNumber}>
-            <Txt variant="small" style={{ color: c.card }}>
-              {index + 1}
-            </Txt>
-          </View>
-          <Txt variant="small" style={{ color: '#CED9E6', flex: 1 }}>
-            {text}
-          </Txt>
-        </View>
-      ))}
-    </Page>
-  );
-}
-function FaceSuccess() {
-  const { t } = useDemo();
-  return (
-    <Page
-      back={false}
-      footer={
-        <Button variant="green" onPress={() => router.replace('/(tabs)/home')}>
-          {t('Continue to Home', 'Padayon sa Home')}
-        </Button>
-      }
-    >
-      <View style={[s.welcomeHero, { flex: 1, justifyContent: 'center' }]}>
-        <View style={s.successIcon}>
-          <CircleCheck size={64} color={c.green} strokeWidth={1.8} />
-        </View>
-        <Txt variant="title">{t('Face enrolled!', 'Naenroll na ang nawong!')}</Txt>
-        <Txt style={s.centerMuted}>
-          {t(
-            'Your demo enrollment is complete. Actual identity verification will be available when the biometric service is connected.',
-            'Nahuman ang demo enrollment. Ang tinuod nga pagverify magamit kon konektado na ang biometric service.',
-          )}
-        </Txt>
-        <Notice>
-          {t(
-            'Prototype preview — no biometric record was created on a server.',
-            'Prototype preview — walay biometric record gihimo sa server.',
-          )}
-        </Notice>
-      </View>
-    </Page>
-  );
-}
+function Capture() { return <BiometricEnrollmentScreen />; }
+function FaceSuccess() { return <BiometricEnrollmentScreen />; }
 const s = StyleSheet.create({
   progressWrap: { gap: 8 },
   progressTrack: {
@@ -1292,40 +1017,5 @@ const s = StyleSheet.create({
     color: 'transparent',
     backgroundColor: 'transparent',
     fontSize: 24,
-  },
-  cameraBox: {
-    height: 290,
-    width: '100%',
-    maxWidth: 290,
-    alignSelf: 'center',
-    borderRadius: 20,
-    backgroundColor: '#182A44',
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  faceGuide: {
-    position: 'absolute',
-    width: 190,
-    height: 240,
-    borderWidth: 2,
-    borderColor: '#5D9ADA',
-    borderRadius: 100,
-  },
-  tipNumber: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: c.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  successIcon: {
-    width: 112,
-    height: 112,
-    borderRadius: 56,
-    backgroundColor: c.greenSoft,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 });

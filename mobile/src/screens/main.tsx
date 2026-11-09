@@ -1,3 +1,4 @@
+import { BiometricSummary } from './biometrics';
 import React, { useState } from 'react';
 import { Modal, Pressable, StyleSheet, View } from 'react-native';
 import { router } from 'expo-router';
@@ -172,8 +173,8 @@ export function HomeScreen() {
         <Pressable accessibilityRole="button" onPress={() => flow('consent')}>
           <Notice tone="warning">
             {t(
-              'Action needed\nComplete your biometric enrollment for faster claiming.',
-              'Kinahanglan og aksyon\nKompletoha ang face enrollment alang sa mas paspas nga claim.',
+              'Optional face verification\nReview consent and arrange enrollment with your facilitator.',
+              'Opsyonal nga face verification\nBasaha ang pagtugot ug pakigsabot sa facilitator alang sa enrollment.',
             )}
           </Notice>
         </Pressable>
@@ -462,7 +463,7 @@ export function WalletScreen() {
 }
 
 export function ProfileScreen() {
-  const { name, phone, beneficiary, accessToken, faceEnrolled, t, reset } = useDemo();
+  const { name, phone, beneficiary, accessToken, t, reset } = useDemo();
   const [logoutLoading, setLogoutLoading] = useState(false);
   const [logoutError, setLogoutError] = useState('');
   return (
@@ -537,24 +538,7 @@ export function ProfileScreen() {
           onPress={() => go('security-privacy')}
         />
       </Card>
-      <Card>
-        <View style={styles.row}>
-          <ScanFace size={20} color={c.primary} />
-          <Txt variant="label">
-            {t('Face verification settings', 'Face verification settings')}
-          </Txt>
-        </View>
-        <Badge tone={faceEnrolled ? 'success' : 'warning'}>
-          {faceEnrolled
-            ? t('Enrolled in preview', 'Naenroll sa preview')
-            : t('Not enrolled', 'Wala pa naenroll')}
-        </Badge>
-        <Button onPress={() => flow('consent')}>
-          {faceEnrolled
-            ? t('Review face enrollment', 'Tan-awa ang face enrollment')
-            : t('Enroll face', 'Ienroll ang nawong')}
-        </Button>
-      </Card>
+      <BiometricSummary />
       {logoutError ? <Notice tone="error">{logoutError}</Notice> : null}
       <Button
         variant="outline"

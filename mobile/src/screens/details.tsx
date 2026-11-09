@@ -1,3 +1,4 @@
+import { BiometricPrivacy } from './biometrics';
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, Switch, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -1213,59 +1214,7 @@ function DocumentUploads() {
     </>
   );
 }
-function Privacy() {
-  const { consentGiven, setConsentGiven, setFaceEnrolled, t } = useDemo();
-  const [revoked, setRevoked] = useState(false);
-  return (
-    <>
-      <Card>
-        <DetailRow
-          icon={ShieldCheck}
-          label={t('Face verification consent', 'Pagtugot sa face verification')}
-          value={
-            consentGiven
-              ? t('Given in this preview', 'Gihatag sa preview')
-              : t('Not given', 'Wala gihatag')
-          }
-        />
-        <Txt variant="small">
-          {t(
-            'Face verification is optional. You may continue with your phone number.',
-            'Opsyonal ang face verification. Pwede mopadayon gamit ang numero.',
-          )}
-        </Txt>
-      </Card>
-      <Notice>
-        {t(
-          'Profile edits and documents you upload are saved to GarantiyAid. Optional face enrollment and consent remain previews; captured enrollment photos stay on this device.',
-          'Ang kausaban sa profile ug mga dokumentong imong gi-upload gitipigan sa GarantiyAid. Preview pa ang opsyonal nga face enrollment ug consent; ang nakuha nga litrato sa enrollment magpabilin sa device.',
-        )}
-      </Notice>
-      {revoked && (
-        <Notice tone="success">
-          {t(
-            'Your preview consent has been withdrawn.',
-            'Nabawi na ang pagtugot sa preview.',
-          )}
-        </Notice>
-      )}
-      <Button
-        variant="outline"
-        disabled={!consentGiven}
-        onPress={() => {
-          setConsentGiven(false);
-          setFaceEnrolled(false);
-          setRevoked(true);
-        }}
-      >
-        {t('Withdraw face consent', 'Bawion ang pagtugot')}
-      </Button>
-      <Button onPress={() => flow('consent')}>
-        {t('Review consent notice', 'Basaha ang pagtugot')}
-      </Button>
-    </>
-  );
-}
+function Privacy() { return <BiometricPrivacy />; }
 
 function Exception({ kind }: { kind: 'schedule' | 'expired' }) {
   const { t } = useDemo();

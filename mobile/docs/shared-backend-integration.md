@@ -24,6 +24,8 @@ For version 4.0, use a clean checkout of backend `42b4552`, then run:
 
 Phase 7 prepares [mobile-sms.patch](../../integrations/shared-backend/mobile-sms.patch) after the notification patch. It adds opt-in Semaphore verification texts with delivery/mode safeguards and connects the mobile Recover account screen to the existing login-code flow. The team has no provider account yet, so real SMS remains inactive and unvalidated; local configuration stays DEVELOPMENT. See [SMS setup](sms-setup.md) and the included `docs/mobile-sms-integration.md`. This patch adds challenge-delivery and session-mode fields and preserves existing development data. No password system or lost-number account linking is introduced.
 
+Phase 8 adds [mobile-biometrics.patch](../../integrations/shared-backend/mobile-biometrics.patch) after the SMS patch. Mobile saves versioned self-consent/retention, reads facilitator enrollment status and confirms consent withdrawal. Staff captures remain in the existing facilitator workflow; staff roles are unchanged. The additive migration allows a beneficiary consent recorder with an exact-owner database constraint. Local processing remains SIMULATED and is labeled in mobile. See [biometrics setup](biometrics-setup.md) and included `docs/mobile-biometrics-integration.md`.
+
 ```powershell
 git switch -c feat/mobile-beneficiary-auth 42b4552
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-v4.patch
@@ -34,6 +36,8 @@ git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-back
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-notifications.patch
 git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-sms.patch
 git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-sms.patch
+git apply --check C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-biometrics.patch
+git apply C:\Users\Ronan\Documents\Garantiy-Aid\integrations\shared-backend\mobile-biometrics.patch
 npm ci
 npx prisma generate
 npx prisma migrate deploy
@@ -42,6 +46,8 @@ npx prisma migrate deploy
 Follow `docs/mobile-v4-integration.md`, `docs/mobile-auth-integration.md`, `docs/mobile-claims-integration.md` and `docs/mobile-notifications-integration.md` included in the patches. The teammate controls shared DATABASE_URL, secrets, and data. Set DATABASE_URL to a separate development instance before running the migration commands above; do not apply the original mobile backend's migrations to the shared database. Do not reset or reseed an existing database. For the historical version-3 base only, the four original phase patches still apply in authentication/documents/overview/QR order.
 
 ## Test this workspace
+
+The actual-client test command now runs the account/claim/document suite and a separate biometric-consent/facilitator-capture suite sequentially. The biometric case requires the isolated migrated database on port 51244 and uses synthetic SIMULATED image bytes only. It never validates a physical camera or real face model.
 
 The local shared `.env` targets a separate embedded PostgreSQL instance on port 51234, distinct from the original backend's 51214. The ignored, workspace-specific helper `.tmp/start-shared-db.mjs` starts it using the already-installed Prisma runtime. If needed, run from this repository's root in a separate terminal:
 
@@ -100,6 +106,8 @@ Version 4 also supports QR_OR_BIOMETRIC: QR alone can complete verification for 
 The mobile API uses multipart only for the shared `/api/v1/mobile` base. Its original local backend keeps raw-byte uploads and received status. Staff can review mobile uploads because both use the same table; uploaded_by_beneficiary records the real uploader without fabricating a staff account. File contents remain private; file-viewing UI, live SMS activation, push/preferences, transfer history, lost-number linking, and a general program catalog are later work. Those unintegrated features still show request errors under the shared prefix. Existing staff records need a separate authorized mobile-linking workflow.
 
 ## Verified result
+
+Phase 8: all 47 mobile regressions, TypeScript, the account/claim/document and biometric actual-client/API/database suites, web/Android exports and six controlled Chrome views pass. Backend defaults remain 414 passed and nine skipped. Five ordered patches apply cleanly on 42b4552, all eight phase-8 files match and staff biometric roles are unchanged. The recorder migration is applied to both local databases. Consent-only, exact retries, staff capture, synthetic duplicate review, withdrawal, renewal, expiry, model compatibility and account isolation are checked. The local processor remains SIMULATED; no real face/camera/anti-spoof validation or upstream deployment is claimed.
 
 Phase 7: 43 mobile regressions, TypeScript, the actual shared client/API suite, both explicit authentication/mocked-SMS database cases, four gateway tests, web/Android exports and five controlled Chrome views pass. Backend defaults report 414 passed, nine skipped and zero failed. Recovery covers validation, failure/retry, duplicate taps, late navigation and DEV/SMS replies. Gateway tests use interception only; no live texts or real carrier receipt are claimed. Both local databases have the additive SMS migration, while the private development mode/key remain unchanged. All four patches apply in sequence and reproduce the 10 phase-7 backend files. A provider account, sender/credits, real phone test and deployment remain external setup requirements.
 

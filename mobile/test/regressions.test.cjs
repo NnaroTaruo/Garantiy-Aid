@@ -16,6 +16,7 @@ function loadSource(file, mocks, globals = {}) {
     ...globals,
     exports,
     require: (name) => {
+      if (name === './biometrics') return { BiometricSummary: 'BiometricSummary', BiometricPrivacy: 'BiometricPrivacy', BiometricConsentScreen: 'BiometricConsentScreen', BiometricEnrollmentScreen: 'BiometricEnrollmentScreen' };
       assert.ok(name in mocks, `Unexpected import: ${name}`);
       return mocks[name];
     },
@@ -28,6 +29,81 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+
+const biometricRecord = (id, consentStatus = 'active', simulated = true) => ({
+  enrollmentMethod: 'staff_assisted', processorMode: simulated ? 'simulated' : 'remote',
+  policy: { version: 'v1.0', retentionUntil: '2027-11-01T00:00:00Z' },
+  consent: { id, version: 'v1.0', status: consentStatus, consentedAt: '2026-11-01T00:00:00Z', retentionUntil: '2027-11-01T00:00:00Z', revokedAt: consentStatus === 'revoked' ? '2026-11-02T00:00:00Z' : null },
+  profile: { id: id + '-profile', consentId: id, status: consentStatus === 'revoked' ? 'revoked' : 'enrolled', simulated, processorCompatible: true, enrolledAt: '2026-11-01T00:00:00Z', lastVerifiedAt: null },
+});
+
+test('consent withdrawal survives stale reads, prevents duplicate writes, and derives real enrollment from compatible records', async () => {
+  const older = deferred(), write = deferred(); let reads = 0, writes = 0;
+  const render = provider({ getBiometrics: () => ++reads === 1 ? biometricRecord('owner') : older.promise,
+    revokeBiometricConsent: () => { writes++; return write.promise; } });
+  await render().startSession('owner', beneficiary('owner'));
+  assert.equal(render().consentGiven, true); assert.equal(render().faceEnrolled, false, 'Simulation must not appear as real enrollment');
+  const read = render().refreshBiometrics();
+  const pending = render().withdrawConsent('owner');
+  assert.equal(await render().withdrawConsent('owner'), false); assert.equal(writes, 1);
+  write.resolve(biometricRecord('owner', 'revoked')); assert.equal(await pending, true);
+  older.resolve(biometricRecord('owner')); await read;
+  assert.equal(render().consentGiven, false); assert.equal(render().biometrics.consent.status, 'revoked');
+  const real = provider({ getBiometrics: async () => biometricRecord('real', 'active', false) });
+  await real().startSession('real', beneficiary('real')); assert.equal(real().faceEnrolled, true);
+});
+
+test('pending biometric consent writes and unauthorized reads cannot affect a replacement account', async () => {
+  for (const outcome of ['saved', 'unauthorized']) {
+    const write = deferred();
+    const render = provider({ getBiometrics: async token => biometricRecord(token),
+      giveBiometricConsent: () => write.promise });
+    await render().startSession('old', beneficiary('old'));
+    const oldAction = render().giveConsent({});
+    await render().startSession('new', beneficiary('new'));
+    if (outcome === 'saved') write.resolve(biometricRecord('old'));
+    else write.reject(new ApiRequestError(401));
+    assert.equal(await oldAction, false);
+    assert.equal(render().accessToken, 'new'); assert.equal(render().biometrics.consent.id, 'new');
+    await render().reset(); assert.equal(render().biometrics, null);
+  }
+});
+
+test('biometric loading errors preserve saved records, retry, and clear the session on a current 401', async () => {
+  let error;
+  const render = provider({ getBiometrics: async () => { if (error) throw error; return biometricRecord('owner'); } });
+  await render().startSession('owner', beneficiary('owner'));
+  error = new Error('offline'); await render().refreshBiometrics();
+  assert.equal(render().biometricsError, true); assert.equal(render().biometrics.consent.id, 'owner');
+  error = null; await render().refreshBiometrics(); assert.equal(render().biometricsError, false);
+  error = new ApiRequestError(401); await render().refreshBiometrics();
+  assert.equal(render().accessToken, ''); assert.equal(render().biometrics, null);
+});
+
+test('consent UI saves once before continuing, offers a harmless skip, and translates failures in EN and BS', async () => {
+  for (const language of ['en', 'bs']) {
+    let cursor = 0, navigation, writes = 0, response = deferred(); const slots = [];
+    const state = { biometrics: { ...biometricRecord('owner'), consent: null, profile: null },
+      refreshBiometrics: async () => {}, giveConsent: async input => { writes++; assert.equal(input.expectedConsentId, null); return response.promise; },
+      t: (en, bs) => language === 'en' ? en : bs };
+    const react = { createElement: (type, props, ...children) => ({ type, props, children }),
+      useEffect: () => {}, useState: initial => { const index = cursor++; if (!(index in slots)) slots[index] = initial;
+        return [slots[index], value => { slots[index] = value; }]; }, useRef: initial => { const index = cursor++;
+        if (!(index in slots)) slots[index] = { current: initial }; return slots[index]; } };
+    const components = new Proxy({}, { get: (_, key) => key === 'flow' ? step => { navigation = step; } : String(key) });
+    const source = loadSource('screens/biometrics.tsx', { react, 'expo-router': { router: { replace: route => { navigation = route; } } },
+      '../components': components, '../state': { useDemo: () => state }, '../api': { ApiRequestError }, '../format': { formatDateTime: value => value } });
+    const render = () => { cursor = 0; return source.BiometricConsentScreen(); };
+    const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children ?? [])] : [];
+    const agree = () => nodes(render()).find(node => node.type === 'Button' && node.children[0] === state.t('Agree and save consent', 'Motugot ug tipigi ang pagtugot'));
+    nodes(render()).find(node => node.type === 'Button' && node.children[0] === state.t('Not now', 'Dili karon')).props.onPress();
+    assert.equal(writes, 0); navigation = null;
+    const save = agree().props.onPress(); agree().props.onPress(); assert.equal(writes, 1); assert.equal(navigation, null);
+    response.reject(new Error('offline')); await save;
+    assert.ok(JSON.stringify(render()).includes(state.t('Consent could not be saved. Try again.', 'Wala matipig ang pagtugot. Sulayi pag-usab.')));
+    response = deferred(); const retry = agree().props.onPress(); response.resolve(true); await retry; assert.equal(navigation, 'capture');
+  }
+});
 
 class ApiRequestError extends Error {
   constructor(status, fields, code = 'REQUEST_FAILED') { super('Request failed'); this.status = status; this.fields = fields; this.code = code; }
@@ -212,6 +288,7 @@ function provider(api = {}, storage = {}) {
       getBeneficiaryOverview: async (token) => overview(token),
       getWalletOverview: async (token) => wallet(token),
       getNotifications: async () => [],
+      getBiometrics: async () => ({ enrollmentMethod: 'staff_assisted', processorMode: 'simulated', policy: { version: 'v1.0', retentionUntil: '2027-11-01T00:00:00Z' }, consent: null, profile: null }),
       markNotificationRead: async (_token, id) => ({ id, readAt: '2026-10-20T01:00:00Z' }),
       updateProfile: async (token, input) => ({ ...beneficiary(token), ...input }),
       getDocuments: async () => [],

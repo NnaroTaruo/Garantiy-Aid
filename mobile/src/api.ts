@@ -73,6 +73,31 @@ export type Beneficiary = {
 
 export type ProfileUpdate = Pick<Beneficiary, 'firstName' | 'middleName' | 'lastName' | 'address' | 'barangayId'>;
 
+export type BiometricOverview = {
+  enrollmentMethod: 'staff_assisted';
+  processorMode: 'simulated' | 'remote';
+  policy: { version: string; retentionUntil: string };
+  consent: null | { id: string; version: string; status: string; consentedAt: string; revokedAt: string | null; retentionUntil: string };
+  profile: null | { id: string; consentId: string; status: string; simulated: boolean; processorCompatible: boolean; enrolledAt: string; lastVerifiedAt: string | null };
+};
+export type BiometricConsentInput = { consentVersion: string; retentionUntil: string; expectedConsentId: string | null };
+
+export async function getBiometrics(accessToken: string) {
+  return (await request<{ data: BiometricOverview }>('/beneficiaries/me/biometrics', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })).data;
+}
+export async function giveBiometricConsent(accessToken: string, input: BiometricConsentInput) {
+  return (await request<{ data: BiometricOverview }>('/beneficiaries/me/biometric-consents', {
+    method: 'POST', headers: { Authorization: `Bearer ${accessToken}` }, body: JSON.stringify(input),
+  })).data;
+}
+export async function revokeBiometricConsent(accessToken: string, consentId: string) {
+  return (await request<{ data: BiometricOverview }>(`/beneficiaries/me/biometric-consents/${encodeURIComponent(consentId)}/revoke`, {
+    method: 'POST', headers: { Authorization: `Bearer ${accessToken}` },
+  })).data;
+}
+
 export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
 export type DocumentType = 'proof_of_residency' | 'valid_id' | 'other' | 'birth_certificate' | 'barangay_certificate' | 'medical_certificate' | 'pwd_id' | 'senior_citizen_id';
 export type BeneficiaryDocument = {

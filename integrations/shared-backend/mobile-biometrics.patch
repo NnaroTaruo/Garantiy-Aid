@@ -1,0 +1,265 @@
+diff --git a/docs/mobile-biometrics-integration.md b/docs/mobile-biometrics-integration.md
+new file mode 100644
+index 0000000..53fddfd
+--- /dev/null
++++ b/docs/mobile-biometrics-integration.md
+@@ -0,0 +1,19 @@
++# Mobile consent and staff-assisted face enrollment
++
++Phase 8 extends backend 42b4552 after mobile-v4, claims, notifications and SMS patches. Apply the additive migration and generate Prisma. No dependency or staff frontend changes are needed. The beneficiary app saves consent and reads status; the assigned facilitator still captures the face through the existing staff enrollment screen.
++
++| Mobile route under /api/v1/mobile | Purpose |
++| --- | --- |
++| GET /beneficiaries/me/biometrics | Own consent, profile status and current notice policy |
++| POST /beneficiaries/me/biometric-consents | Give consent using consentVersion, retentionUntil and expectedConsentId (UUID or null) |
++| POST /beneficiaries/me/biometric-consents/:consentId/revoke | Withdraw an owned consent and revoke its linked profile |
++
++The notice uses staff version v1.0 and a maximum one-calendar-year retention period, returned by GET for review before submission. An exact active self-consent retry is idempotent, including after staff capture. Replacements require the latest consent ID; stale requests return 409. A newer consent never restores a revoked template. Withdrawal is idempotent and cannot revoke a different, newer consent. A declined optional screen creates no consent. Logout invalidates mutation authorization.
++
++The schema allows either a staff recorder or the actual beneficiary as recorder, with a database constraint requiring exactly one actor and requiring the self-recorder to equal the consent owner. Existing staff records remain unchanged. Enrollment attribution remains a required staff user. Staff consent changes and mobile changes reuse the enrollment advisory lock to coordinate with capture. Mobile mutations also lock/revalidate their mobile session. Private, no-store responses omit templates, captures, liveness/match scores, staff identifiers and duplicate candidates. Consent alone never creates a face profile.
++
++Profile states include enrolled, pending_duplicate_review, duplicate_blocked, revoked, expired and consent_required. The DTO reports processorMode, simulated and processorCompatible. SIMULATED records are test data, not evidence of real face matching. The deployed processor must be configured and validated separately; existing templates from another model require facilitator attention. No mobile face login, selfie endpoint, staff role expansion, claim release, wallet credit or permanent deletion is added. Existing facilitator capture, liveness, duplicate review and claim-verification controls remain authoritative.
++
++Local verification: from mobile, point DATABASE_URL at isolated PostgreSQL 51244 and run npm.cmd run test:shared. The biometrics case uses the real TypeScript client and HTTP API, self-consent and actor constraints, staff visibility/capture, simulated duplicate review, exact retries, withdrawal/renewal/expiry/model compatibility, owner isolation and logout. Synthetic image bytes exercise SIMULATED processing only; no person, physical camera or remote model is validated. It removes its own fixtures afterward. Default backend tests remain separately runnable with npm test.
++
++Manual check: mobile Profile > Face verification > Review consent > Agree and save consent; staff facilitator opens the same beneficiary's biometric workspace and uses the saved active consent for capture. Refresh mobile status afterward. Security & Privacy offers an explicit withdrawal confirmation. A fresh consent requires fresh facilitator enrollment. Always confirm the processor's simulation disclosure before describing a face check as real.
+diff --git a/prisma/migrations/20261110000200_allow_mobile_biometric_consent/migration.sql b/prisma/migrations/20261110000200_allow_mobile_biometric_consent/migration.sql
+new file mode 100644
+index 0000000..9eb13b3
+--- /dev/null
++++ b/prisma/migrations/20261110000200_allow_mobile_biometric_consent/migration.sql
+@@ -0,0 +1,13 @@
++ALTER TABLE "biometric_consents"
++  ALTER COLUMN "recorded_by" DROP NOT NULL,
++  ADD COLUMN "recorded_by_beneficiary" UUID;
++
++ALTER TABLE "biometric_consents"
++  ADD CONSTRAINT "biometric_consents_self_recorder_fkey"
++    FOREIGN KEY ("recorded_by_beneficiary") REFERENCES "beneficiaries"("beneficiary_id") ON DELETE RESTRICT ON UPDATE CASCADE,
++  ADD CONSTRAINT "biometric_consents_recorder_check" CHECK (
++    ("recorded_by" IS NOT NULL AND "recorded_by_beneficiary" IS NULL)
++    OR ("recorded_by" IS NULL AND "recorded_by_beneficiary" IS NOT NULL AND "recorded_by_beneficiary" = "beneficiary_id")
++  );
++
++CREATE INDEX "biometric_consents_beneficiary_id_created_at_idx" ON "biometric_consents"("beneficiary_id", "created_at");
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 4abcd52..b5c6d97 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -493,7 +493,8 @@ model Beneficiary {
+   documents               BeneficiaryDocument[] @relation("BeneficiaryDocuments")
+   selfUploadedDocuments   BeneficiaryDocument[] @relation("BeneficiaryDocumentUploader")
+   biometricData           BiometricData?
+-  biometricConsents       BiometricConsent[]
++  biometricConsents       BiometricConsent[] @relation("BiometricConsentBeneficiary")
++  selfRecordedConsents    BiometricConsent[] @relation("BiometricConsentSelfRecorder")
+   biometricAttempts       BiometricVerificationAttempt[]
+   candidateDuplicateCases BiometricDuplicateCase[]       @relation("BiometricDuplicateCandidate")
+   matchedDuplicateCases   BiometricDuplicateCase[]       @relation("BiometricDuplicateMatch")
+@@ -674,14 +675,17 @@ model BiometricConsent {
+   consentedAt    DateTime  @map("consented_at") @db.Timestamptz(6)
+   revokedAt      DateTime? @map("revoked_at") @db.Timestamptz(6)
+   retentionUntil DateTime  @map("retention_until") @db.Timestamptz(6)
+-  recordedById   String    @map("recorded_by") @db.Uuid
++  recordedById   String?   @map("recorded_by") @db.Uuid
++  recordedByBeneficiaryId String? @map("recorded_by_beneficiary") @db.Uuid
+   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+ 
+-  beneficiary   Beneficiary    @relation(fields: [beneficiaryId], references: [beneficiaryId])
+-  recordedBy    User           @relation("ConsentRecorder", fields: [recordedById], references: [userId])
++  beneficiary   Beneficiary    @relation("BiometricConsentBeneficiary", fields: [beneficiaryId], references: [beneficiaryId])
++  recordedBy    User?          @relation("ConsentRecorder", fields: [recordedById], references: [userId], onDelete: Restrict)
++  recordedByBeneficiary Beneficiary? @relation("BiometricConsentSelfRecorder", fields: [recordedByBeneficiaryId], references: [beneficiaryId], onDelete: Restrict, map: "biometric_consents_self_recorder_fkey")
+   biometricData BiometricData?
+ 
++  @@index([beneficiaryId, createdAt])
+   @@map("biometric_consents")
+ }
+ 
+diff --git a/src/modules/beneficiaries/beneficiary.controller.js b/src/modules/beneficiaries/beneficiary.controller.js
+index 3d9b63b..41917b1 100644
+--- a/src/modules/beneficiaries/beneficiary.controller.js
++++ b/src/modules/beneficiaries/beneficiary.controller.js
+@@ -13,6 +13,7 @@ import {
+   resolveBeneficiaryListBarangay,
+ } from "./beneficiary.policy.js";
+ import { assertBiometricConsentManageAllowed } from "../biometrics/biometric.policy.js";
++import { acquireBiometricEnrollmentLock } from "../biometrics/biometric.service.js";
+ 
+ async function ensureActiveBarangay(barangayId) {
+   const barangay = await prisma.barangay.findUnique({
+@@ -161,6 +162,7 @@ export const recordBiometricConsent = asyncHandler(async (req, res) => {
+   );
+ 
+   const consent = await prisma.$transaction(async (tx) => {
++    await acquireBiometricEnrollmentLock(tx);
+     const revokedConsents = await tx.biometricConsent.updateMany({
+       where: {
+         beneficiaryId: beneficiary.beneficiaryId,
+diff --git a/src/modules/biometrics/biometric.controller.js b/src/modules/biometrics/biometric.controller.js
+index c1381c7..c9541af 100644
+--- a/src/modules/biometrics/biometric.controller.js
++++ b/src/modules/biometrics/biometric.controller.js
+@@ -37,6 +37,7 @@ const consentSelect = {
+   revokedAt: true,
+   retentionUntil: true,
+   recordedById: true,
++  recordedByBeneficiaryId: true,
+   createdAt: true,
+   updatedAt: true,
+   biometricData: {
+@@ -98,6 +99,7 @@ export const revokeBiometricConsent = asyncHandler(async (req, res) => {
+   assertBiometricConsentManageAllowed(req.staffUser);
+   const beneficiary = await getBeneficiaryOrThrow(req.validatedParams.beneficiaryId, req.staffUser);
+   const result = await prisma.$transaction(async (tx) => {
++    await acquireBiometricEnrollmentLock(tx);
+     const consent = await tx.biometricConsent.findFirst({
+       where: {
+         consentId: req.validatedParams.consentId,
+diff --git a/src/modules/mobile/mobile.routes.js b/src/modules/mobile/mobile.routes.js
+index 6f3a5a2..0a1a91d 100644
+--- a/src/modules/mobile/mobile.routes.js
++++ b/src/modules/mobile/mobile.routes.js
+@@ -8,6 +8,8 @@ import { downloadMobileDocument, listMobileDocuments, uploadMobileDocument } fro
+ import { getMobileOverview } from "./mobileOverview.service.js";
+ import { issueMobileClaimPass } from "./mobileClaimPass.service.js";
+ import { getMobileWallet } from "./mobileWallet.service.js";
++import { getMobileBiometrics, giveMobileBiometricConsent, revokeMobileBiometricConsent } from "./mobileBiometrics.service.js";
++import { mobileBiometricConsentSchema, mobileBiometricConsentParamsSchema } from "./mobile.schemas.js";
+ import { getMobileNotifications, readMobileNotification } from "./mobileNotifications.service.js";
+ import { mobileNotificationParamsSchema } from "./mobile.schemas.js";
+ import { mobileAuthenticationRateLimiter } from "../../middleware/rateLimit.js";
+@@ -47,6 +49,15 @@ mobileRoutes.get("/beneficiaries/me/overview", asyncHandler(async (req, res) =>
+ mobileRoutes.get("/beneficiaries/me/wallet", asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileWallet(req.mobileSession) });
+ }));
++mobileRoutes.get("/beneficiaries/me/biometrics", asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileBiometrics(req.mobileSession) });
++}));
++mobileRoutes.post("/beneficiaries/me/biometric-consents", validateBody(mobileBiometricConsentSchema), asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await giveMobileBiometricConsent(req.mobileSession, req.validatedBody) });
++}));
++mobileRoutes.post("/beneficiaries/me/biometric-consents/:consentId/revoke", validateParams(mobileBiometricConsentParamsSchema), asyncHandler(async (req, res) => {
++  res.set("Cache-Control", "private, no-store").json({ success: true, data: await revokeMobileBiometricConsent(req.mobileSession, req.validatedParams.consentId) });
++}));
+ mobileRoutes.get("/beneficiaries/me/notifications", asyncHandler(async (req, res) => {
+   res.set("Cache-Control", "private, no-store").json({ success: true, data: await getMobileNotifications(req.mobileSession) });
+ }));
+diff --git a/src/modules/mobile/mobile.schemas.js b/src/modules/mobile/mobile.schemas.js
+index f0ade67..989f5f0 100644
+--- a/src/modules/mobile/mobile.schemas.js
++++ b/src/modules/mobile/mobile.schemas.js
+@@ -28,6 +28,9 @@ export const mobileRegistrationSchema = createBeneficiarySchema.pick({ birthDate
+ 
+ export const mobileOtpRequestSchema = z.object({ contactNumber, purpose }).strict();
+ export const mobileNotificationParamsSchema = z.object({ notificationId: z.uuid() }).strict();
++export const mobileBiometricConsentSchema = z.object({ consentVersion: z.string().min(1).max(20),
++  retentionUntil: z.iso.datetime(), expectedConsentId: z.uuid().nullable() }).strict();
++export const mobileBiometricConsentParamsSchema = z.object({ consentId: z.uuid() }).strict();
+ export const mobileOtpVerificationSchema = mobileOtpRequestSchema.extend({ code: z.string().regex(/^\d{6}$/) }).strict();
+ export const mobileProfileSchema = z.object({ firstName: name, middleName, lastName: name, address, barangayId })
+   .partial().strict().refine((value) => Object.keys(value).length > 0, "Supply a name, address, or barangay change.");
+diff --git a/src/modules/mobile/mobileBiometrics.service.js b/src/modules/mobile/mobileBiometrics.service.js
+new file mode 100644
+index 0000000..efc2c33
+--- /dev/null
++++ b/src/modules/mobile/mobileBiometrics.service.js
+@@ -0,0 +1,97 @@
++import prisma from "../../lib/prisma.js";
++import { env } from "../../config/env.js";
++import { AppError } from "../../utils/AppError.js";
++import { acquireBiometricEnrollmentLock, biometricProfileStatus, consentEffectiveStatus } from "../biometrics/biometric.service.js";
++import { lockMobileSession } from "./mobile.service.js";
++
++const CONSENT_VERSION = "v1.0";
++const consentSelect = { consentId: true, consentVersion: true, consentGiven: true, consentedAt: true,
++  revokedAt: true, retentionUntil: true, recordedByBeneficiaryId: true };
++const consentWhere = beneficiaryId => ({ beneficiaryId });
++const consentOrder = [{ createdAt: "desc" }, { consentId: "desc" }];
++function policy(now = new Date()) {
++  const until = new Date(now);
++  until.setUTCFullYear(until.getUTCFullYear() + 1); // Match the staff consent form's one-year default.
++  return { version: CONSENT_VERSION, retentionUntil: until.toISOString() };
++}
++
++async function readStatus(session, database) {
++  const beneficiaryId = session.account.beneficiaryId;
++  const [consent, profile] = await Promise.all([
++    database.biometricConsent.findFirst({ where: consentWhere(beneficiaryId), select: consentSelect, orderBy: consentOrder }),
++    database.biometricData.findFirst({ where: { beneficiaryId, consent: { beneficiaryId } }, select: {
++      biometricId: true, consentId: true, dataStatus: true, insightfaceModel: true, createdAt: true, lastVerifiedAt: true,
++      consent: { select: { consentGiven: true, revokedAt: true, retentionUntil: true } },
++    } }),
++  ]);
++  const active = consent && consentEffectiveStatus(consent) === "ACTIVE";
++  const profileStatus = biometricProfileStatus(profile);
++  return { enrollmentMethod: "staff_assisted", processorMode: env.biometricProcessorMode.toLowerCase(), policy: policy(),
++    consent: consent ? { id: consent.consentId, version: consent.consentVersion,
++      status: consentEffectiveStatus(consent).toLowerCase(), consentedAt: consent.consentedAt.toISOString(),
++      revokedAt: consent.revokedAt?.toISOString() ?? null, retentionUntil: consent.retentionUntil.toISOString() } : null,
++    profile: profile ? { id: profile.biometricId, consentId: profile.consentId,
++      status: (profileStatus === "ENROLLED" && (!active || profile.consentId !== consent.consentId)
++        ? "CONSENT_REQUIRED" : profileStatus).toLowerCase(),
++      simulated: profile.insightfaceModel === "gya-simulated-v1",
++      processorCompatible: profile.insightfaceModel === (env.biometricProcessorMode === "REMOTE" ? "ArcFace" : "gya-simulated-v1"),
++      enrolledAt: profile.createdAt.toISOString(), lastVerifiedAt: profile.lastVerifiedAt?.toISOString() ?? null } : null,
++  };
++}
++
++export function getMobileBiometrics(session) {
++  return prisma.$transaction(tx => readStatus(session, tx), { isolationLevel: "RepeatableRead" });
++}
++
++async function audit(database, session, consentId, action) {
++  await database.auditLog.create({ data: { actorType: "BENEFICIARY", action,
++    entityAffected: "BIOMETRIC_CONSENT", recordId: consentId,
++    details: { source: "MOBILE_APP", beneficiaryId: session.account.beneficiaryId, rawCaptureStored: false } } });
++}
++
++async function changeConsent(session, change) {
++  try {
++    await prisma.$transaction(async tx => {
++      await lockMobileSession(tx, session);
++      await acquireBiometricEnrollmentLock(tx);
++      await change(tx);
++    }, { isolationLevel: "Serializable" });
++  } catch (error) {
++    if (["P2034", "P2002"].includes(error.code)) throw new AppError(409, "BIOMETRIC_CONSENT_CHANGED", "The consent record changed. Refresh it and try again.");
++    throw error;
++  }
++  return getMobileBiometrics(session);
++}
++
++export function giveMobileBiometricConsent(session, input) {
++  const beneficiaryId = session.account.beneficiaryId;
++  const until = new Date(input.retentionUntil);
++  if (input.consentVersion !== CONSENT_VERSION || until <= new Date() || until > new Date(policy().retentionUntil)) {
++    throw new AppError(409, "BIOMETRIC_POLICY_CHANGED", "Review the current consent notice and retention date before continuing.");
++  }
++  return changeConsent(session, async tx => {
++    const latest = await tx.biometricConsent.findFirst({ where: consentWhere(beneficiaryId), select: consentSelect, orderBy: consentOrder });
++    if (latest && consentEffectiveStatus(latest) === "ACTIVE" && latest.recordedByBeneficiaryId === beneficiaryId
++      && latest.consentVersion === input.consentVersion && latest.retentionUntil.getTime() === until.getTime()) return;
++    if ((latest?.consentId ?? null) !== input.expectedConsentId) throw new AppError(409, "BIOMETRIC_CONSENT_CHANGED", "The consent record changed. Refresh it and try again.");
++    const now = new Date();
++    await tx.biometricConsent.updateMany({ where: { beneficiaryId, consentGiven: true, revokedAt: null }, data: { revokedAt: now } });
++    await tx.biometricData.updateMany({ where: { beneficiaryId, dataStatus: { in: ["ACTIVE", "PENDING_DUPLICATE_REVIEW", "DUPLICATE_BLOCKED"] } }, data: { dataStatus: "REVOKED" } });
++    const consent = await tx.biometricConsent.create({ data: { beneficiaryId, recordedByBeneficiaryId: beneficiaryId,
++      consentGiven: true, consentVersion: CONSENT_VERSION, consentedAt: now, retentionUntil: until } });
++    await audit(tx, session, consent.consentId, "MOBILE_BIOMETRIC_CONSENT_GIVEN");
++  });
++}
++
++export function revokeMobileBiometricConsent(session, consentId) {
++  const beneficiaryId = session.account.beneficiaryId;
++  return changeConsent(session, async tx => {
++    const consent = await tx.biometricConsent.findFirst({ where: { consentId, beneficiaryId }, select: consentSelect });
++    if (!consent) throw new AppError(404, "BIOMETRIC_CONSENT_NOT_FOUND", "Consent record not found.");
++    if (!consent.consentGiven || consent.revokedAt) return;
++    const revokedAt = new Date();
++    await tx.biometricConsent.update({ where: { consentId }, data: { revokedAt } });
++    await tx.biometricData.updateMany({ where: { beneficiaryId, consentId, dataStatus: { in: ["ACTIVE", "PENDING_DUPLICATE_REVIEW", "DUPLICATE_BLOCKED"] } }, data: { dataStatus: "REVOKED" } });
++    await audit(tx, session, consentId, "MOBILE_BIOMETRIC_CONSENT_REVOKED");
++  });
++}

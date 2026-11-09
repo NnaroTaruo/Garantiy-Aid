@@ -7,7 +7,7 @@ GarantiyAid is a capstone prototype for beneficiary registration, phone OTP auth
 - [`mobile/`](mobile/README.md) — React Native and Expo beneficiary app based on the supplied Figma design.
 - [`backend/`](backend/README.md) — Express, Prisma, and PostgreSQL REST API.
 
-Registration, generated OTP verification, persistent sessions, profile loading and editing, program enrollments, assigned schedules, QR pass issuance, read-only claim and wallet history, and in-app notifications use the backend database. Biometrics and SMS/push delivery remain previews. The shared-backend milestones below describe which features are connected to the staff workflow. The wallet records assistance; it does not hold or transfer funds.
+Registration, generated OTP verification, persistent sessions, profile loading and editing, program enrollments, assigned schedules, QR pass issuance, read-only claim and wallet history, and in-app notifications use the backend database. Shared biometric consent and staff enrollment status are saved; local face processing remains simulated. Real SMS/push delivery remains inactive. The milestones below describe staff integration. The wallet records assistance; it does not hold or transfer funds.
 
 The document-upload milestone connects **Profile > Enrollment documents** to private uploads and saved document records. PDF, JPEG, and PNG files up to 5 MB are accepted, with file-type checks, safe retries, account isolation, and received status. Profile edits, the notification inbox, and read state also persist across logout/login. Receiving a document does not approve enrollment; staff review remains separate.
 
@@ -23,7 +23,9 @@ Phase 6 connects the notification inbox, unread indicator and saved read status 
 
 Phase 7 connects Recover account to the existing login-code verification flow and prepares an opt-in Semaphore SMS adapter. The team has no provider account yet, so local development still displays development codes and no real SMS delivery has been validated. The [SMS setup guide](mobile/docs/sms-setup.md) covers activation prerequisites, private backend configuration and the new mode/delivery safeguards. Apply `mobile-sms.patch` after the notification patch and deploy its additive migration. Live SMS activation, lost-number account linking, push/preferences, remaining record screens and real biometrics remain pending.
 
-Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. The READMEs cover the newer notification, profile-editing, and document-upload milestones.
+Phase 8 saves mobile biometric consent, displays facilitator enrollment status and supports confirmed withdrawal in Security & Privacy. The facilitator captures the face through the existing staff workflow. The local processor is SIMULATED and the app labels its records accordingly. Apply `mobile-biometrics.patch` after the SMS patch and deploy its additive migration. See the [biometrics guide](mobile/docs/biometrics-setup.md). Real model/device validation and upstream deployment remain pending.
+
+Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. These READMEs describe the later milestones.
 
 If the PDF preview does not open, use the [direct PDF download](https://raw.githubusercontent.com/NnaroTaruo/Garantiy-Aid/main/output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf).
 

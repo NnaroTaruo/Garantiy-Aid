@@ -9,6 +9,11 @@ import {
   updateProfile,
   getDocuments,
   uploadDocument,
+  getBiometrics,
+  giveBiometricConsent,
+  revokeBiometricConsent,
+  type BiometricOverview,
+  type BiometricConsentInput,
   type Beneficiary,
   type BeneficiaryOverview,
   type WalletOverview,
@@ -73,9 +78,14 @@ type DemoState = {
   registration: RegistrationInfo;
   setRegistration: (value: Partial<RegistrationInfo>) => void;
   faceEnrolled: boolean;
-  setFaceEnrolled: (value: boolean) => void;
   consentGiven: boolean;
-  setConsentGiven: (value: boolean) => void;
+  biometrics: BiometricOverview | null;
+  biometricsLoading: boolean;
+  biometricsError: boolean;
+  biometricsSaving: boolean;
+  refreshBiometrics: () => Promise<void>;
+  giveConsent: (input: BiometricConsentInput) => Promise<boolean>;
+  withdrawConsent: (consentId: string) => Promise<boolean>;
   notifications: BeneficiaryNotification[];
   notificationsLoading: boolean;
   notificationsError: boolean;
@@ -101,8 +111,15 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const [name, setName] = useState('Maria Santos');
   const [registration, setRegistrationState] =
     useState<RegistrationInfo>(emptyRegistration);
-  const [faceEnrolled, setFaceEnrolled] = useState(false);
-  const [consentGiven, setConsentGiven] = useState(false);
+  const [biometrics, setBiometrics] = useState<BiometricOverview | null>(null);
+  const [biometricsLoading, setBiometricsLoading] = useState(false);
+  const [biometricsError, setBiometricsError] = useState(false);
+  const [biometricsSaving, setBiometricsSaving] = useState(false);
+  const biometricRequest = useRef(0);
+  const biometricWrite = useRef<number | null>(null);
+  const consentGiven = biometrics?.consent?.status === 'active';
+  const faceEnrolled = consentGiven && biometrics?.profile?.status === 'enrolled'
+    && !biometrics.profile.simulated && biometrics.profile.processorCompatible;
   const [notifications, setNotifications] = useState<BeneficiaryNotification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [notificationsError, setNotificationsError] = useState(false);
@@ -130,8 +147,10 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     setAuthError(false);
     setName('Maria Santos');
     setRegistrationState(emptyRegistration);
-    setFaceEnrolled(false);
-    setConsentGiven(false);
+    setBiometrics(null);
+    setBiometricsLoading(false);
+    setBiometricsError(false);
+    setBiometricsSaving(false);
     setNotifications([]);
     setNotificationsLoading(false);
     setNotificationsError(false);
@@ -280,6 +299,44 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       throw error;
     }
   };
+  const loadBiometrics = async (token: string, version: number) => {
+    if (!token || version !== sessionVersion.current || biometricWrite.current === version) return;
+    const request = ++biometricRequest.current;
+    setBiometricsLoading(true);
+    setBiometricsError(false);
+    try {
+      const next = await getBiometrics(token);
+      if (version === sessionVersion.current && request === biometricRequest.current) setBiometrics(next);
+    } catch (error) {
+      if (version !== sessionVersion.current || request !== biometricRequest.current) return;
+      if (error instanceof ApiRequestError && error.status === 401) await reset();
+      else setBiometricsError(true);
+    } finally {
+      if (version === sessionVersion.current && request === biometricRequest.current) setBiometricsLoading(false);
+    }
+  };
+  const saveConsent = async (save: () => Promise<BiometricOverview>) => {
+    const version = renderedSessionVersion;
+    if (!accessToken || version !== sessionVersion.current || biometricWrite.current === version) return false;
+    biometricWrite.current = version;
+    ++biometricRequest.current; // An earlier read must not restore consent after withdrawal.
+    setBiometricsLoading(false);
+    setBiometricsSaving(true);
+    try {
+      const next = await save();
+      if (version !== sessionVersion.current) return false;
+      setBiometrics(next);
+      setBiometricsError(false);
+      return true;
+    } catch (error) {
+      if (version !== sessionVersion.current) return false;
+      if (error instanceof ApiRequestError && error.status === 401) { await reset(); return false; }
+      throw error;
+    } finally {
+      if (biometricWrite.current === version) biometricWrite.current = null;
+      if (version === sessionVersion.current) setBiometricsSaving(false);
+    }
+  };
   const restoreSession = async () => {
     const version = ++sessionVersion.current;
     setAuthLoading(true);
@@ -295,7 +352,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       if (version !== sessionVersion.current) return;
       setAccessToken(token);
       applyBeneficiary(beneficiary);
-      await Promise.all([loadOverview(token, version), loadWallet(token, version), loadNotifications(token, version)]);
+      await Promise.all([loadOverview(token, version), loadWallet(token, version), loadNotifications(token, version), loadBiometrics(token, version)]);
     } catch (error) {
       if (version !== sessionVersion.current) return;
       if (error instanceof ApiRequestError && error.status === 401) {
@@ -313,6 +370,10 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const startSession = async (token: string, beneficiary: Beneficiary) => {
     const version = ++sessionVersion.current;
+    setBiometrics(null);
+    setBiometricsLoading(false);
+    setBiometricsError(false);
+    setBiometricsSaving(false);
     setOverview(null);
     setOverviewLoading(false);
     setOverviewError(false);
@@ -331,7 +392,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     setAuthLoading(false);
     setAuthError(false);
     applyBeneficiary(beneficiary);
-    await Promise.all([loadOverview(token, version), loadWallet(token, version), loadNotifications(token, version)]);
+    await Promise.all([loadOverview(token, version), loadWallet(token, version), loadNotifications(token, version), loadBiometrics(token, version)]);
   };
   return (
     <Context.Provider
@@ -366,9 +427,14 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
         setRegistration: (value) =>
           setRegistrationState((previous) => ({ ...previous, ...value })),
         faceEnrolled,
-        setFaceEnrolled,
         consentGiven,
-        setConsentGiven,
+        biometrics,
+        biometricsLoading,
+        biometricsError,
+        biometricsSaving,
+        refreshBiometrics: () => loadBiometrics(accessToken, renderedSessionVersion),
+        giveConsent: (input) => saveConsent(() => giveBiometricConsent(accessToken, input)),
+        withdrawConsent: (id) => saveConsent(() => revokeBiometricConsent(accessToken, id)),
         notifications,
         notificationsLoading,
         notificationsError,
