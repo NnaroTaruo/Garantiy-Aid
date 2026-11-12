@@ -1,6 +1,6 @@
 # Android phone alerts (push)
 
-Phase 13 adds opt-in Android phone alerts for the shared staff backend. The code, tests and portable backend patch are complete locally. **Real delivery to a phone has not been tested yet.** It needs the Expo/Firebase account setup below and a development or release build on an Android phone.
+Phase 13 adds opt-in Android phone alerts for the shared staff backend. On November 12, 2026, a physical Android phone registered for alerts and received the new schedule update. Expo accepted the send on the first attempt. The tester tapped the Android alert, opened the matching notification details, and the notice was marked read. Logout revoked the session and removed the phone registration. Signing in again with the same account automatically registered the phone for the new session.
 
 ## How it works
 
@@ -24,7 +24,7 @@ Phase 13 adds opt-in Android phone alerts for the shared staff backend. The code
 
 ## One-time account setup (requires your accounts)
 
-Nothing below has been done. Keep the service-account key private.
+This workspace is linked to [@ronan24/garantiyaid-mobile](https://expo.dev/accounts/ronan24/projects/garantiyaid-mobile), with its EAS project ID saved in mobile/app.json. Firebase project `garantiyaid-96ef3` has an Android app for `ph.garantiyaid.mobile`; its downloaded `mobile/google-services.json` is validated and referenced by `expo.android.googleServicesFile`. The matching FCM V1 service-account key was uploaded to EAS and assigned to this Android package on November 10, 2026. Its private JSON remains outside the repository. `mobile/eas.json` defines the internal `development` profile, and SDK-compatible `expo-dev-client` is installed. The first [Android development build](https://expo.dev/accounts/ronan24/projects/garantiyaid-mobile/builds/bae20dff-bda8-4dd2-88c7-969659c22b1f) finished and was installed on a phone. The app connected to Metro through the development launcher's URL field. The local API uses `MOBILE_PUSH_MODE=EXPO` for the test session. Keep the service-account key private.
 
 1. **Create the EAS project.** In `mobile/`, sign in and link the project:
    ```powershell
@@ -32,7 +32,7 @@ Nothing below has been done. Keep the service-account key private.
    npx eas-cli@latest init
    ```
    `init` writes `expo.extra.eas.projectId` (and `owner`) into `app.json`. Without it, the app shows "This copy of the app is not set up for phone alerts yet."
-2. **Choose the Android package name** and add it to `app.json` under `expo.android`, for example `"package": "ph.garantiyaid.mobile"`. Use the same value everywhere below; it cannot easily change after release.
+2. **Android package name.** This workspace uses `ph.garantiyaid.mobile`, saved under `expo.android.package` in `app.json`. Enter that exact value when registering the Android app in Firebase. It must match the native app and cannot be changed for an already registered Firebase app.
 3. **Firebase app.** In the [Firebase console](https://console.firebase.google.com/), create or choose a project, then add an Android app with that exact package name. Download `google-services.json` into `mobile/` and add `"googleServicesFile": "./google-services.json"` under `expo.android` in `app.json`.
 4. **FCM V1 key.** In Firebase, go to Project settings > Service accounts > **Generate new private key**. Save the JSON outside the repository, or add its filename to `.gitignore`. Never commit it. Upload it to Expo:
    ```powershell

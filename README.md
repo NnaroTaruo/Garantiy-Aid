@@ -1,104 +1,28 @@
-# GarantiyAid
+<p align="center">
+  <img src="mobile/assets/icon.png" alt="GarantiyAid logo" width="120" height="120" />
+</p>
 
-GarantiyAid is a capstone prototype for beneficiary registration, phone OTP authentication, distribution scheduling, secure QR claim passes, and saved claim and assistance records.
+<h1 align="center">GarantiyAid</h1>
 
-## Projects
+<p align="center">A capstone prototype for government assistance scheduling and claims.</p>
 
-- [`mobile/`](mobile/README.md) — React Native and Expo beneficiary app based on the supplied Figma design.
-- [`backend/`](backend/README.md) — Express, Prisma, and PostgreSQL REST API.
+Beneficiaries use the mobile app to sign in with a phone code, submit documents, check enrollment and schedules, show a QR claim pass, and view assistance records. Staff use the shared web system to review enrollments, publish schedules, verify claims, and record releases.
 
-Registration, generated OTP verification, persistent sessions, profile loading and editing, program enrollments, assigned schedules, QR pass issuance, read-only claim and wallet history, and in-app notifications use the backend database. Shared biometric consent and staff enrollment status are saved; local face processing remains simulated. Real SMS/push delivery remains inactive. The milestones below describe staff integration. The wallet records assistance; it does not hold or transfer funds.
+## What we tested
 
-The document-upload milestone connects **Profile > Enrollment documents** to private uploads and saved document records. PDF, JPEG, and PNG files up to 5 MB are accepted, with file-type checks, safe retries, account isolation, and received status. Profile edits, the notification inbox, and read state also persist across logout/login. Receiving a document does not approve enrollment; staff review remains separate.
+- A staff-published schedule sent a push notification to a physical Android phone. Tapping the alert opened the matching notification details.
+- Signing out removed the phone's alert registration. Signing in again with the same account restored it.
+- The staff website verified a test QR claim, rejected a duplicate attempt, and recorded a simulated physical release and receipt.
 
-Shared staff-backend integration covers beneficiary registration, development OTP, sessions/logout, profiles, private documents with staff review/corrections, assigned enrollments/schedules, and QR passes. The local staff frontend and backend were updated to version 4.0 on November 9, 2026. The [integration guide](mobile/docs/shared-backend-integration.md) includes a consolidated version-4 backend patch, checks, and remaining gaps; earlier ordered patches are retained for version 3. The mobile integration changes have not been merged or deployed to the team's shared backend.
+The local prototype uses development OTP codes and simulated face matching. The Wallet shows assistance records and simulated credits.
 
-Home, Schedule, and Enrollment status now read the shared backend's assigned programs, enrollment decisions/feedback, and published schedules. Empty accounts show empty states; session dates/times and venues match staff assignments. Refresh actions load later staff changes.
+## Run locally
 
-Mobile-issued QR passes connect to the staff verifier. Eligible beneficiaries can reopen the same pass, refresh its status, and see expiry/revocation feedback. Staff-issued passes retain their separate delivery path. Required biometrics, staff claim verification and assistance release remain controlled by staff.
+| Guide | Use it for |
+| --- | --- |
+| [Mobile app](mobile/README.md) | Run the React Native and Expo app in a browser or on Android. |
+| [Standalone API](backend/README.md) | Set up the local Express and PostgreSQL API with sample data. |
+| [Shared staff integration](mobile/docs/shared-backend-integration.md) | Connect staff enrollment, scheduling, claim, and release workflows. |
+| [Android phone alerts](mobile/docs/push-notifications.md) | Set up the development build and test staff-triggered alerts. |
 
-Phase 5 connects Wallet to shared claim status and physical-release history, including package/quantity, release time and receipt number. It also reads existing wallet summaries and claim-linked credit/reversal entries. Physical goods never become wallet credits, and an absent wallet remains absent. Apply `mobile-claims.patch` after `mobile-v4.patch`; see the integration guide.
-
-Phase 6 connects the notification inbox, unread indicator and saved read status to the staff backend. New enrollment decisions, published schedules, completed claim verification, physical releases and simulated benefit credits/reversals produce controlled English/Bisaya in-app messages in the same transaction as the staff action. Apply `mobile-notifications.patch` after the claims patch, generate Prisma and deploy its additive notification migration. SMS/push delivery, preferences, full transfer history, recovery and biometric capture/matching remain pending. All backend patches await teammate review and deployment.
-
-Phase 7 connects Recover account to the existing login-code verification flow and prepares an opt-in Semaphore SMS adapter. The team has no provider account yet, so local development still displays development codes and no real SMS delivery has been validated. The [SMS setup guide](mobile/docs/sms-setup.md) covers activation prerequisites, private backend configuration and the new mode/delivery safeguards. Apply `mobile-sms.patch` after the notification patch and deploy its additive migration. Live SMS activation, lost-number account linking, push/preferences, remaining record screens and real biometrics remain pending.
-
-Phase 8 saves mobile biometric consent, displays facilitator enrollment status and supports confirmed withdrawal in Security & Privacy. The facilitator captures the face through the existing staff workflow. The local processor is SIMULATED and the app labels its records accordingly. Apply `mobile-biometrics.patch` after the SMS patch and deploy its additive migration. See the [biometrics guide](mobile/docs/biometrics-setup.md). Real model/device validation and upstream deployment remain pending.
-
-Phase 9 connects Help > Talk to staff to the existing staff escalation queue. Beneficiaries can save concerns, reopen requests, send follow-ups and refresh for staff replies/resolution. Ownership, retries and barangay staff scope are enforced; no external AI or delivery service is needed. Apply `mobile-support.patch` after the biometric patch. It adds no migration or dependency. See [support setup](mobile/docs/support-setup.md). Updates currently use manual refresh.
-
-Phase 10 adds staff-defined program document checklists and named Other uploads/corrections. Mobile retains the exact requested name so staff enrollment validation can distinguish requirements. Apply `mobile-document-requirements.patch` after the support patch; no migration or dependency is added. See [document checklists](mobile/docs/document-checklists.md) and [remaining work](mobile/docs/remaining-work.md).
-
-Phase 11 opens saved PDF/images through the private owner endpoint. Browsers preview and download temporary blobs; Android previews images and uses the system open/save chooser. Apply `mobile-document-viewing.patch` after the checklist patch for the saved MIME response fix; no migration is needed. Mobile adds SDK-compatible `expo-sharing`. See [document viewing](mobile/docs/document-viewing.md) for testing and temporary-file cleanup; physical Android validation remains pending.
-
-Phase 12 saves notification preferences for automatic enrollment, schedule and claim/release updates in the shared account. Staff actions honor those settings for new in-app messages; saved inbox history remains available. Apply `mobile-notification-preferences.patch` after the viewer patch, generate Prisma and deploy its additive migration. No package is added. SMS reminders and remote push remain inactive; see [notification settings](mobile/docs/notification-settings.md).
-
-Phase 13 adds opt-in Android phone alerts. A beneficiary turns them on for one signed-in phone. Staff actions that create in-app updates then queue a generic alert ("You have a new account update"), which the backend sends through Expo only after the staff transaction commits. Logout and account changes stop alerts for the previous account, and tapping an alert opens the update through the signed-in account. Apply `mobile-push-notifications.patch` after the preferences patch and deploy its additive migration; push stays off until `MOBILE_PUSH_MODE=EXPO`. Real delivery still needs an Expo project, Firebase/FCM V1 credentials, a development or release build and a phone test; see [Android phone alerts](mobile/docs/push-notifications.md).
-
-Read the [October 19 PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) or its [editable source](mobile/docs/app-update-and-testing-guide.md) for the earlier progress snapshot and local setup. These READMEs describe the later milestones.
-
-If the PDF preview does not open, use the [direct PDF download](https://raw.githubusercontent.com/NnaroTaruo/Garantiy-Aid/main/output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf).
-
-## Local development
-
-Open the repository folder in VS Code. These commands use PowerShell and assume Node.js and npm are installed. Keep the API and mobile preview running in separate terminals.
-
-### 1. Install the backend and start local PostgreSQL
-
-```powershell
-cd backend
-npm install
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
-npm run db:local
-```
-
-Edit `backend/.env` before continuing:
-
-- Set `DATABASE_URL` to the **direct `postgres://` connection string** printed by `db:local`. This project uses the PostgreSQL driver, so choose that URL rather than the `prisma+postgres://` URL. The printed port can differ from the example `.env` file.
-- On a first setup, replace the example `AUTH_PEPPER` with a random secret of at least 32 characters. Keep your existing configured value when returning to the project.
-- Keep `CORS_ORIGINS` set to `http://localhost:8765,http://127.0.0.1:8765` for the browser commands below.
-
-To generate an authentication secret locally, run this command and copy the result into `AUTH_PEPPER`:
-
-```powershell
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
-
-### 2. Apply the database setup and start the API
-
-In the backend terminal:
-
-```powershell
-npm run db:generate
-npm run db:deploy
-npm run db:seed
-npm run dev
-```
-
-The seed creates fictional local test records and resets them to their fixed example values. Its October 2, 2026 schedule has expired; see the [backend notes](backend/README.md) for the test account and expected results.
-
-Open [the API health endpoint](http://127.0.0.1:3000/health). Expect `status: ok` and `database: connected`. Leave the API terminal open.
-
-### 3. Configure the mobile browser preview
-
-Open another terminal at the repository root:
-
-```powershell
-cd mobile
-npm install
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
-```
-
-Set `EXPO_PUBLIC_API_URL=http://127.0.0.1:3000` in `mobile/.env`, then start Expo:
-
-```powershell
-npm run web -- --port 8765
-```
-
-Open [the browser preview](http://127.0.0.1:8765). Restart Expo after changing the API URL. See the [mobile instructions](mobile/README.md) for emulator and physical-phone addresses.
-
-The private `.env` files are ignored by Git; commit `.env.example` when sharing configuration examples.
-
-## Checks
-
-Run `npm test` and `npm run typecheck` from both `backend/` and `mobile/`. From `mobile/`, also run `npm run export:web` and `npm run export:android` to check the browser and Android bundles. Android export checks compilation; a physical-device walkthrough is still required.
+See the [verification notes](mobile/docs/verification.md) and [remaining work](mobile/docs/remaining-work.md) for current test results and deployment status. The [PDF progress guide](output/pdf/GarantiyAid-Mobile-Update-and-Completed-Tasks.pdf) is an earlier project snapshot.

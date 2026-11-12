@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "92484991709",
+    "project_id": "garantiyaid-96ef3",
+    "storage_bucket": "garantiyaid-96ef3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:92484991709:android:ad7dfc0cbf898d0ba7f934",
+        "android_client_info": {
+          "package_name": "ph.garantiyaid.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAMGGxNFOxkukuPzGGYmcc8r3cNKYZmgD0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

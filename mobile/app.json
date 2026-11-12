@@ -11,6 +11,8 @@
       "supportsTablet": false
     },
     "android": {
+      "package": "ph.garantiyaid.mobile",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#F8FAFC",
         "foregroundImage": "./assets/icon.png"
@@ -42,6 +44,12 @@
           "defaultChannel": "account-updates"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e10780ef-4c52-48ff-ad6e-1b3db08d8e36"
+      }
+    },
+    "owner": "ronan24"
   }
 }

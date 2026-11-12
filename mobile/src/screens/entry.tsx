@@ -834,20 +834,6 @@ function OTP() {
         <Txt variant="label">+63 {phone || '9175550147'}</Txt>
       </Txt>
       <View style={s.otpWrap}>
-        <View style={s.otpBoxes} accessibilityElementsHidden>
-          {Array.from({ length: 6 }, (_, index) => (
-            <View
-              key={index}
-              style={[
-                s.otpBox,
-                error && { borderColor: c.error },
-                code.length === index && { borderColor: c.primary },
-              ]}
-            >
-              <Txt variant="heading">{code[index] || ''}</Txt>
-            </View>
-          ))}
-        </View>
         <TextInput
           accessibilityLabel={t(
             'Six-digit verification code',
@@ -865,6 +851,25 @@ function OTP() {
           caretHidden
           style={s.otpInput}
         />
+        <View
+          style={s.otpBoxes}
+          pointerEvents="none"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {Array.from({ length: 6 }, (_, index) => (
+            <View
+              key={index}
+              style={[
+                s.otpBox,
+                error && { borderColor: c.error },
+                code.length === index && { borderColor: c.primary },
+              ]}
+            >
+              <Txt variant="heading">{code[index] || ''}</Txt>
+            </View>
+          ))}
+        </View>
       </View>
       {error ? (
         <Txt variant="small" style={{ color: c.error }}>
@@ -998,7 +1003,8 @@ const s = StyleSheet.create({
   },
   rule: { height: 1, backgroundColor: c.outline, flex: 1 },
   otpWrap: { height: 56, position: 'relative' },
-  otpBoxes: { flexDirection: 'row', gap: 6, height: 56 },
+  // Keep the digit row opaque so native input text can't show through it.
+  otpBoxes: { flexDirection: 'row', gap: 6, height: 56, backgroundColor: c.surface, zIndex: 1 },
   otpBox: {
     flex: 1,
     borderWidth: 1,
