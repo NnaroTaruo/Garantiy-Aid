@@ -34,6 +34,8 @@ import {
   Txt,
 } from '../components';
 import { useDemo } from '../state';
+import { BarangayPicker } from '../barangay-picker';
+import { BirthDatePicker } from '../birth-date-picker';
 import {
   ApiRequestError,
   getBarangays,
@@ -143,19 +145,10 @@ function Progress({ step, total }: { step: number; total: number }) {
   );
 }
 
-const formatBirthDate = (value: string) => {
-  const digits = value.replace(/\D/g, '').slice(0, 8);
-  if (digits.length <= 2) return digits;
-  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
-  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-};
-
 const isValidBirthDate = (value: string) => {
-  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return false;
-  const month = Number(match[1]);
-  const day = Number(match[2]);
-  const year = Number(match[3]);
+  const [, year, month, day] = match.map(Number);
   const date = new Date(year, month - 1, day);
   const today = new Date();
   return (
@@ -174,14 +167,6 @@ const plausibleName = (value: string) => {
     clean.length <= 60 &&
     letterCount(clean) >= 2 &&
     /^[\p{L}\p{M}](?:[\p{L}\p{M} .'-]*[\p{L}\p{M}.])?$/u.test(clean)
-  );
-};
-const plausiblePlace = (value: string) => {
-  const clean = value.trim();
-  return (
-    clean.length <= 80 &&
-    letterCount(clean) >= 2 &&
-    /^[\p{L}\p{M}\d](?:[\p{L}\p{M}\d .'-]*[\p{L}\p{M}\d.])?$/u.test(clean)
   );
 };
 const plausibleAddress = (value: string) => {
@@ -346,24 +331,17 @@ export function AccountSetup() {
           textContentType="familyName"
           maxLength={60}
         />
-        <Field
-          label={t('Birth date', 'Petsa sa pagkatawo')}
+        <BirthDatePicker
           value={birthDate}
-          onChangeText={(value) => {
-            setBirthDate(formatBirthDate(value));
+          onChange={(date) => {
+            setBirthDate(date);
             setErrors((previous) => ({ ...previous, birthDate: false }));
           }}
-          placeholder="MM/DD/YYYY"
           error={
             errors.birthDate
-              ? t(
-                  'Enter a valid birth date in MM/DD/YYYY format.',
-                  'Isulod ang hustong petsa sa MM/DD/YYYY nga porma.',
-                )
+              ? t('Choose your birth date to continue.', 'Pilia ang imong petsa sa pagkatawo aron makapadayon.')
               : undefined
           }
-          keyboardType="number-pad"
-          maxLength={10}
         />
         <View style={{ gap: 8 }}>
           <Txt variant="label">{t('Sex', 'Sekso')}</Txt>
@@ -427,46 +405,31 @@ export function AccountSetup() {
 function AccountAddress() {
   const { registration, setRegistration, t } = useDemo();
   const [address, setAddress] = useState(registration.address);
-  const [barangay, setBarangay] = useState(registration.barangay);
-  const [city, setCity] = useState(registration.city);
+  const [barangayId, setBarangayId] = useState(registration.barangayId);
   const [errors, setErrors] = useState<Record<string, boolean>>({});
-  const [barangays, setBarangays] = useState<Barangay[]>([]);
+  const [barangays, setBarangays] = useState<Barangay[] | null>(null);
   const [serviceAreaError, setServiceAreaError] = useState(false);
+  const [areaAttempt, setAreaAttempt] = useState(0);
   useEffect(() => {
+    let active = true;
+    setServiceAreaError(false);
     getBarangays()
-      .then((items) => {
-        setBarangays(items);
-        if (items.length === 1 && !barangay.trim()) {
-          setBarangay(items[0].barangayName);
-          setCity(items[0].city);
-        }
-      })
-      .catch(() => setServiceAreaError(true));
-  }, []);
+      .then((items) => { if (active) setBarangays(items); })
+      .catch(() => { if (active) setServiceAreaError(true); });
+    return () => { active = false; };
+  }, [areaAttempt]);
+  const selectedBarangay = barangays?.find((item) => item.id === barangayId);
   const continueToPhone = () => {
-    const nextErrors: Record<string, boolean> = {};
-    if (!plausibleAddress(address)) nextErrors.address = true;
-    const selectedBarangay = barangays.find(
-      (item) =>
-        item.barangayName.toLocaleLowerCase() === barangay.trim().toLocaleLowerCase() &&
-        item.city.toLocaleLowerCase() === city.trim().toLocaleLowerCase(),
-    );
-    if (!plausiblePlace(barangay) || !selectedBarangay) nextErrors.barangay = true;
-    if (!plausiblePlace(city)) nextErrors.city = true;
-    setErrors(nextErrors);
-    if (Object.keys(nextErrors).length) return;
-    setRegistration({
-      address: address.trim(),
-      barangay: barangay.trim(),
-      barangayId: selectedBarangay!.id,
-      city: city.trim(),
-    });
+    const validAddress = plausibleAddress(address);
+    setErrors({ address: !validAddress, barangay: !selectedBarangay });
+    if (!validAddress || !selectedBarangay) return;
+    setRegistration({ address: address.trim(), barangayId: selectedBarangay.id });
     flow('mobile-number');
   };
   return (
     <Page
       title={t('Create account', 'Paghimo og account')}
-      footer={<Button onPress={continueToPhone}>{t('Continue', 'Padayon')}</Button>}
+      footer={<Button disabled={!barangays?.length} onPress={continueToPhone}>{t('Continue', 'Padayon')}</Button>}
     >
       <Progress step={2} total={4} />
       <View style={{ gap: 7 }}>
@@ -506,63 +469,42 @@ function AccountAddress() {
           textContentType="streetAddressLine1"
           maxLength={120}
         />
-        <Field
+        <BarangayPicker
           label={t('Barangay', 'Barangay')}
-          value={barangay}
-          onChangeText={(value) => {
-            setBarangay(value);
+          areas={barangays ?? []}
+          value={barangayId}
+          onChange={(id) => {
+            setBarangayId(id);
             setErrors((previous) => ({ ...previous, barangay: false }));
           }}
-          placeholder={t('Enter barangay', 'Isulod ang barangay')}
           error={
             errors.barangay
               ? t(
-                  'Choose a barangay currently served by GarantiyAid.',
-                  'Pagpili og barangay nga giserbisyohan karon sa GarantiyAid.',
+                  'Choose your barangay to continue.',
+                  'Pilia ang imong barangay aron makapadayon.',
                 )
               : undefined
           }
-          autoCapitalize="words"
-          maxLength={80}
         />
-        <Field
-          label={t('City or municipality', 'Siyudad o lungsod')}
-          value={city}
-          onChangeText={(value) => {
-            setCity(value);
-            setErrors((previous) => ({ ...previous, city: false }));
-          }}
-          placeholder={t('Enter city or municipality', 'Isulod ang siyudad o lungsod')}
-          error={
-            errors.city
-              ? t(
-                  'Enter a valid city or municipality.',
-                  'Isulod ang hustong siyudad o lungsod.',
-                )
-              : undefined
-          }
-          autoCapitalize="words"
-          autoComplete="address-line2"
-          maxLength={80}
-        />
+        <View style={{ gap: 8 }}>
+          <Txt variant="label">{t('City or municipality', 'Siyudad o lungsod')}</Txt>
+          <View style={styles.input}>
+            <Txt accessibilityLiveRegion="polite" style={{ fontSize: 16, color: selectedBarangay ? c.text : c.muted }}>
+              {selectedBarangay?.city ?? '—'}
+            </Txt>
+          </View>
+        </View>
       </Card>
       {serviceAreaError ? (
-        <Notice tone="error">
-          {t(
-            'Service areas could not be loaded. Start the backend, then return to this screen.',
-            'Wala ma-load ang mga service area. I-start ang backend, dayon balik dinhi.',
-          )}
-        </Notice>
-      ) : (
-        <Notice>
-          {barangays.length
-            ? t(
-                `Available now: ${barangays.map((item) => `${item.barangayName}, ${item.city}`).join('; ')}.`,
-                `Magamit karon: ${barangays.map((item) => `${item.barangayName}, ${item.city}`).join('; ')}.`,
-              )
-            : t('Loading available service areas…', 'Nag-load sa mga service area…')}
-        </Notice>
-      )}
+        <>
+          <Notice tone="error">{t('Could not load barangays. Check your connection and try again.', 'Wala makuha ang mga barangay. Susihon ang koneksyon ug sulayi pag-usab.')}</Notice>
+          <Button variant="outline" onPress={() => setAreaAttempt((attempt) => attempt + 1)}>{t('Try again', 'Sulayi pag-usab')}</Button>
+        </>
+      ) : barangays === null ? (
+        <Notice>{t('Loading barangays…', 'Gikuha ang mga barangay…')}</Notice>
+      ) : barangays.length === 0 ? (
+        <Notice>{t('No barangays are available yet.', 'Walay barangay nga magamit karon.')}</Notice>
+      ) : null}
     </Page>
   );
 }
@@ -620,14 +562,13 @@ function PhoneEntry({ login }: { login: boolean }) {
           );
           return;
         }
-        const [month, day, year] = registration.birthDate.split('/');
         try {
           developmentOtp = (
             await registerBeneficiary({
               firstName: registration.firstName,
               middleName: registration.middleName,
               lastName: registration.lastName,
-              birthDate: `${year}-${month}-${day}`,
+              birthDate: registration.birthDate,
               sex: registration.sex,
               address: registration.address,
               barangayId: registration.barangayId,

@@ -6,6 +6,8 @@ The commands below use the standalone mobile API. For staff document review, pub
 
 On a physical Android phone, we verified schedule push delivery, tapping through to the matching update, registration removal on logout, and automatic registration on sign-in. Use the [Android phone alerts guide](docs/push-notifications.md) for the development APK and shared API setup. See [remaining work](docs/remaining-work.md) for provider setup, device checks, and deployment.
 
+See the capstone checklists for [account access](docs/account-access-checklist.md), [beneficiary enrollment](docs/beneficiary-enrollment-checklist.md), and [biometric authentication](docs/biometric-checklist.md).
+
 ## Run in the browser
 
 Start the [backend API](../backend/README.md) first. From the repository root, open another PowerShell terminal:
@@ -39,6 +41,22 @@ For Expo Go, use the computer's actual LAN address, keep the phone and computer 
 The API must remain running on the computer. The phone must be able to reach its LAN address on port `3000`. The private `.env` file is ignored by Git.
 
 On the shared backend, open Profile > Face verification to save consent and view the facilitator's enrollment record. Face capture takes place with the barangay facilitator; mobile does not request camera access. Security & Privacy supports confirmed consent withdrawal. The current local processor is SIMULATED; real matching and physical-device checks remain pending. These endpoints are unavailable on the original port-3000 backend. See [biometrics setup](docs/biometrics-setup.md).
+
+## Update the Android preview
+
+From `mobile/`, build and install the first APK that supports EAS Update:
+
+```powershell
+npx eas-cli@latest build --platform android --profile preview
+```
+
+For later changes to screens, text, or JavaScript, publish to the same preview channel and environment:
+
+```powershell
+npx eas-cli@latest update --platform android --channel preview --environment preview --message "Describe the change"
+```
+
+The preview environment supplies the hosted `EXPO_PUBLIC_API_URL` for both commands. On the phone, open the preview with an internet connection, then close and reopen it after the update downloads. Use a new APK when upgrading Expo SDK or changing native dependencies. The fingerprint runtime policy serves updates only to compatible builds.
 
 ## Implemented frontend
 

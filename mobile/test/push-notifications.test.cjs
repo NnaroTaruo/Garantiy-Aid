@@ -388,7 +388,7 @@ test('a notification opened from an alert is loaded once through the current acc
     'lucide-react-native': components, '../components': components, '../state': { useDemo: () => state, peso: String },
     '../api': {}, '../format': { formatDateTime: (value) => value }, '../theme': { colors: {}, fonts: {} },
     'expo-document-picker': {}, 'react-native-qrcode-svg': 'QRCode', './main': { s: {} },
-    './biometrics': {}, './support': {}, './document-checklist': {}, './document-preview': {}, './notification-settings': {},
+    './biometrics': {}, './support': {}, './document-checklist': {}, './document-preview': {}, './notification-settings': {}, '../barangay-picker': {},
   });
   const content = () => JSON.stringify(runtime.render(() => source.DetailScreen().children[0].children[0].type()));
   content(); runtime.flush();

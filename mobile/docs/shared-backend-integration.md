@@ -67,6 +67,14 @@ Follow `docs/mobile-v4-integration.md`, `docs/mobile-auth-integration.md`, `docs
 
 ## Test this workspace
 
+To populate a development or preview database for the mobile address dropdown, run the [Cebu City barangay seed](../../integrations/shared-backend/cebu-city-barangays.sql) against the intended shared backend database after applying its migrations. From the local `shared-backend/` directory:
+
+```powershell
+npx.cmd prisma db execute --file ../integrations/shared-backend/cebu-city-barangays.sql
+```
+
+The seed adds the 80 Cebu City barangays from the Philippine Statistics Authority. It can be rerun without replacing existing service areas, changing their active status, or importing beneficiary records. The mobile app uses the active service areas and their IDs from the API.
+
 The actual-client test command now runs the account/claim/document suite and a separate biometric-consent/facilitator-capture suite sequentially. The biometric case requires the isolated migrated database on port 51244 and uses synthetic SIMULATED image bytes only. It never validates a physical camera or real face model.
 
 The local shared `.env` targets a separate embedded PostgreSQL instance on port 51234, distinct from the original backend's 51214. The ignored, workspace-specific helper `.tmp/start-shared-db.mjs` starts it using the already-installed Prisma runtime. If needed, run from this repository's root in a separate terminal:

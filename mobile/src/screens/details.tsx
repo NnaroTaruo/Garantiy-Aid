@@ -3,6 +3,7 @@ import { SupportContent } from './support';
 import { DocumentChecklist } from './document-checklist';
 import { DocumentPreview } from './document-preview';
 import { BiometricPrivacy } from './biometrics';
+import { BarangayPicker } from '../barangay-picker';
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -854,33 +855,22 @@ function ProfileForm({ beneficiary }: { beneficiary: Beneficiary }) {
           editable={!saving} autoCapitalize="words" autoComplete="street-address" maxLength={500}
           error={errors.address ? t('Enter a complete address, 5–500 characters.', 'Isulod ang kompleto nga adres, 5–500 ka karakter.') : undefined}
         />
-        <Txt variant="label">{t('Barangay and city', 'Barangay ug siyudad')}</Txt>
         {areaLoading ? <Txt variant="small">{t('Loading service areas…', 'Nag-load sa mga service area…')}</Txt> : areaError ? (
           <>
             <Notice tone="error">{t('Service areas could not be loaded. Your saved barangay will be kept.', 'Wala ma-load ang mga service area. Magpabilin ang imong natipig nga barangay.')}</Notice>
             <Button variant="outline" disabled={saving} onPress={() => setAreaAttempt((value) => value + 1)}>{t('Retry service areas', 'Sulayi pag-usab ang mga service area')}</Button>
           </>
         ) : (
-          <View accessibilityRole="radiogroup" accessibilityLabel={t('Barangay and city', 'Barangay ug siyudad')} style={{ gap: 8 }}>
-            {barangays.map((barangay) => {
-              const selected = draft.barangayId === barangay.id;
-              return (
-                <Pressable key={barangay.id} accessibilityRole="radio" disabled={saving}
-                  accessibilityState={{ checked: selected, disabled: saving }}
-                  onPress={() => change('barangayId', barangay.id)}
-                  style={[styles.input, styles.row, { gap: 8 }, selected && { borderColor: c.primary, backgroundColor: c.primarySoft }]}
-                >
-                  {selected && <Check size={18} color={c.primary} />}
-                  <Txt style={{ flex: 1 }}>{`${barangay.barangayName}, ${barangay.city}, ${barangay.province}`}</Txt>
-                </Pressable>
-              );
-            })}
+          <>
+            <BarangayPicker label={t('Barangay and city', 'Barangay ug siyudad')} areas={barangays}
+              value={draft.barangayId} onChange={(id) => change('barangayId', id)} disabled={saving} showCity
+              error={errors.barangayId ? t('Choose an active service area.', 'Pagpili og aktibong service area.') : undefined}
+            />
             {!barangays.some((item) => item.id === draft.barangayId) && (
               <Notice>{t('Your saved barangay is not currently listed. It will be kept unless you choose another service area.', 'Wala sa listahan karon ang imong natipig nga barangay. Magpabilin kini gawas kon mopili ka og laing service area.')}</Notice>
             )}
-          </View>
+          </>
         )}
-        {errors.barangayId && <Txt variant="small" accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: c.error }}>{t('Choose an active service area.', 'Pagpili og aktibong service area.')}</Txt>}
       </Card>
       {saveError && <Notice tone="error">{Object.values(errors).some(Boolean)
         ? t('Check the highlighted fields and try saving again.', 'Susihon ang mga field ug sulayi pagtipig pag-usab.')

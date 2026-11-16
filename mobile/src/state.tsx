@@ -33,9 +33,7 @@ export type RegistrationInfo = {
   birthDate: string;
   sex: string;
   address: string;
-  barangay: string;
   barangayId: string;
-  city: string;
 };
 const emptyRegistration: RegistrationInfo = {
   firstName: '',
@@ -44,9 +42,7 @@ const emptyRegistration: RegistrationInfo = {
   birthDate: '',
   sex: '',
   address: '',
-  barangay: '',
   barangayId: '',
-  city: 'Cebu City',
 };
 type DemoState = {
   language: Language;

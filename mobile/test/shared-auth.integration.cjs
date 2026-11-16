@@ -68,6 +68,22 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
       assert.ok(response.ok, JSON.stringify({ status: response.status, error: payload.error }));
       return payload.data;
     };
+    const createdByStaff = await staffRequest('/beneficiaries', facilitatorToken, {
+      firstName: 'Synthetic', lastName: 'StaffRegistration', birthDate: '1995-01-02', sex: 'female', address: '1 Sample Street',
+    });
+    extraBeneficiaries.push(createdByStaff.beneficiary.beneficiaryId);
+    assert.equal(createdByStaff.beneficiary.barangayId, barangayId);
+    const staffSearch = await fetch(`${base}/beneficiaries?search=Updated&barangayId=${barangayId}&status=active`,
+      { headers: { Authorization: `Bearer ${reviewerToken}` } });
+    assert.equal(staffSearch.status, 200);
+    assert.deepEqual((await staffSearch.json()).data.beneficiaries.map(person => person.beneficiaryId), [beneficiaryId]);
+    const editOnStaff = (token) => fetch(`${base}/beneficiaries/${beneficiaryId}`, {
+      method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address: '25 Shared Street' }),
+    });
+    assert.equal((await editOnStaff(reviewerToken)).status, 403);
+    assert.equal((await editOnStaff(facilitatorToken)).status, 200);
+    assert.equal((await api.getCurrentBeneficiary(login.accessToken)).address, '25 Shared Street');
     const overview = () => api.getBeneficiaryOverview(login.accessToken);
     const records = () => api.getWalletOverview(login.accessToken);
     const notices = () => api.getNotifications(login.accessToken);
@@ -133,6 +149,10 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     assert.equal(forbiddenApproval.status, 401);
     await staffRequest(`/enrollments/${enrollmentId}/resubmit`, staffToken);
     await staffRequest(`/enrollments/${enrollmentId}/start-review`, reviewerToken);
+    const reviewDetails = await fetch(`${base}/enrollments/${enrollmentId}`, { headers: { Authorization: `Bearer ${reviewerToken}` } });
+    assert.equal(reviewDetails.status, 200);
+    assert.ok((await reviewDetails.json()).data.enrollment.eligibilityEvaluation.results
+      .some(criterion => criterion.fieldName === 'AGE' && criterion.outcome === 'MET'));
     await staffRequest(`/enrollments/${enrollmentId}/approve`, reviewerToken, { remarks: 'Approved for the synthetic schedule test.' });
     assert.equal((await overview()).enrollments[0].status, 'approved');
     const approvalNotice = (await notices()).find(item => item.title === 'Enrollment approved');
@@ -588,6 +608,14 @@ test('the real mobile API shares accounts, schedules, QR verification, releases,
     assert.ok(finalNamed.some(item => item.id === namedCorrection.id && item.documentName === 'Certificate of Indigency' && item.status === 'accepted'));
     const visibleToStaff = await fetch(`${base}/beneficiaries/${beneficiaryId}/documents`, { headers: { Authorization: `Bearer ${staffToken}` } });
     assert.equal((await visibleToStaff.json()).data.documents.find(item => item.documentId === namedCorrection.id).documentName, 'Certificate of Indigency');
+    const otherEnrollment = await staffRequest(`/programs/${programId}/enrollments`, facilitatorToken, { beneficiaryId: other.beneficiary.id });
+    const otherEnrollmentId = otherEnrollment.enrollment.enrollmentId;
+    await staffRequest(`/enrollments/${otherEnrollmentId}/start-review`, reviewerToken);
+    const reason = 'The independent reviewer rejected this synthetic application.';
+    await staffRequest(`/enrollments/${otherEnrollmentId}/reject`, reviewerToken, { reason });
+    const rejected = (await api.getBeneficiaryOverview(otherLogin.accessToken)).enrollments.find(item => item.id === otherEnrollmentId);
+    assert.equal(rejected.status, 'rejected');
+    assert.equal(rejected.reviewNotes, reason);
     await api.logout(login.accessToken);
     await assert.rejects(api.downloadDocument(login.accessToken, document), error => error.status === 401);
     await assert.rejects(api.getDocumentRequirements(login.accessToken), error => error.status === 401);

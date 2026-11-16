@@ -22,6 +22,8 @@ function loadSource(file, mocks, globals = {}) {
       if (name === './document-preview') return { DocumentPreview: 'DocumentPreview' };
       if (name === './notification-settings') return { NotificationSettings: 'NotificationSettings' };
       if (name === './phone-alerts') return { PhoneAlerts: 'PhoneAlerts' };
+      if (name === '../barangay-picker') return { BarangayPicker: 'BarangayPicker' };
+      if (name === '../birth-date-picker') return { BirthDatePicker: 'BirthDatePicker' };
       assert.ok(name in mocks, `Unexpected import: ${name}`);
       return mocks[name];
     },
@@ -511,7 +513,7 @@ test('existing accounts finish signup through the correct login or registration 
     const slots = [], requests = [], gate = deferred();
     const state = {
       phone: '9175550999', setPhone: (phone) => { state.phone = phone; }, t: (en) => en,
-      registration: { firstName: 'Test', lastName: 'Beneficiary', birthDate: '01/01/2000',
+      registration: { firstName: 'Test', lastName: 'Beneficiary', birthDate: '2000-02-29',
         sex: 'Female', address: '12 Test Street', barangayId: 'test-area' },
       startSession: async (token, owner) => { session = { token, owner }; },
     };
@@ -533,7 +535,8 @@ test('existing accounts finish signup through the correct login or registration 
       '../state': { useDemo: () => state },
       '../api': {
         ApiRequestError,
-        registerBeneficiary: async () => {
+        registerBeneficiary: async ({ birthDate }) => {
+          assert.equal(birthDate, '2000-02-29');
           requests.push('create');
           await gate.promise;
           throw new ApiRequestError(409, undefined, 'PHONE_ALREADY_REGISTERED');
@@ -1573,7 +1576,9 @@ test('the profile form retains failed edits, prevents double saves, and sends on
   assert.ok(field(render(), 'First name').props.error);
   assert.ok(!JSON.stringify(render()).includes('Your profile was saved.'));
   field(render(), 'First name').props.onChangeText('  María  ');
-  nodes(render()).find((node) => node.props?.accessibilityRole === 'radio' && node.props.key === 'new').props.onPress();
+  const barangayPicker = nodes(render()).find((node) => node.props?.label === 'Barangay and city');
+  assert.equal(barangayPicker.props.value, 'old');
+  barangayPicker.props.onChange('new');
   response = deferred();
   saveButton(render()).props.onPress();
   assert.equal(writes, 2);

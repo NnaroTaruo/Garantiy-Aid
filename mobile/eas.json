@@ -3,6 +3,14 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal"
+    },
+    "preview": {
+      "distribution": "internal",
+      "environment": "preview",
+      "channel": "preview",
+      "android": {
+        "buildType": "apk"
+      }
     }
   }
 }

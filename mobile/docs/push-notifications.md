@@ -65,7 +65,7 @@ This workspace is linked to [@ronan24/garantiyaid-mobile](https://expo.dev/accou
      npx expo start --dev-client
      ```
      Expo notes a known issue: in development builds, opening the app from an alert while it is fully closed can fail to finish the splash screen. Release builds are not affected.
-   - For a release-style test, use `--profile preview` with an HTTPS API URL baked in through `EXPO_PUBLIC_API_URL` in `eas.json`. Android release builds block plain `http://` by default.
+   - For a release-style test, use `--profile preview` with an HTTPS `EXPO_PUBLIC_API_URL` in the Expo project's `preview` environment. Use that same environment when [publishing an update](../README.md#update-the-android-preview). Android release builds block plain `http://` by default.
 
 ## Android testing (phone)
 
